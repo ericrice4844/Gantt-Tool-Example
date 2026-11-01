@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Easy Gantt</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="toolbar" id="toolbar">
+  <div class="brand" title="Easy Gantt">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><rect x="2" y="4" width="10" height="4" rx="1"/><rect x="8" y="10" width="12" height="4" rx="1"/><rect x="5" y="16" width="8" height="4" rx="1"/></svg>
+    <input id="projectName" class="project-name" aria-label="Project name" spellcheck="false">
+  </div>
+
+  <div class="group" aria-label="File">
+    <button data-cmd="new" title="New project">New</button>
+    <button data-cmd="open" title="Open a saved .json project (Ctrl+O)">Open</button>
+    <button data-cmd="save" title="Download the project as .json (Ctrl+S)">Save</button>
+    <button data-cmd="csv" title="Export the table as CSV (opens in LibreOffice / Excel)">Export CSV</button>
+  </div>
+
+  <div class="group" aria-label="Tasks">
+    <button data-cmd="addTask" class="primary" title="Insert a task below the selection (Insert)">+ Task</button>
+    <button data-cmd="addMilestone" title="Insert a milestone (zero-duration task)">+ Milestone</button>
+    <button data-cmd="details" title="Open task details: dates, costs, notes and dependencies (Enter on the ID column, or double-click)">Details&hellip;</button>
+    <button data-cmd="delete" title="Delete selected tasks (Delete)">Delete</button>
+  </div>
+
+  <div class="group" aria-label="Outline">
+    <button data-cmd="outdent" title="Outdent - move up one level (Alt+Shift+Left)">&#8676; Outdent</button>
+    <button data-cmd="indent" title="Indent - make a child of the task above (Alt+Shift+Right)">Indent &#8677;</button>
+    <button data-cmd="moveUp" title="Move task up (Alt+Shift+Up)">&#8593;</button>
+    <button data-cmd="moveDown" title="Move task down (Alt+Shift+Down)">&#8595;</button>
+    <button data-cmd="expandAll" title="Expand all summary tasks">&#8862;</button>
+    <button data-cmd="collapseAll" title="Collapse all summary tasks">&#8863;</button>
+  </div>
+
+  <div class="group" aria-label="Dependencies">
+    <select id="linkType" title="Dependency type used by the Link button">
+      <option value="FS">Finish-to-Start (FS)</option>
+      <option value="SS">Start-to-Start (SS)</option>
+      <option value="FF">Finish-to-Finish (FF)</option>
+      <option value="SF">Start-to-Finish (SF)</option>
+    </select>
+    <button data-cmd="link" title="Link the selected tasks in order (Ctrl+L). Select 2+ rows with Ctrl/Shift-click.">Link</button>
+    <button data-cmd="unlink" title="Remove links between the selected tasks, or all links of a single task">Unlink</button>
+  </div>
+
+  <div class="group" aria-label="View">
+    <select id="zoom" title="Timescale">
+      <option value="day">Days</option>
+      <option value="week" selected>Weeks</option>
+      <option value="month">Months</option>
+    </select>
+    <label class="check" title="Highlight tasks with zero slack"><input type="checkbox" id="showCritical" checked> Critical path</label>
+    <button data-cmd="scrollToTask" title="Scroll the chart to the selected task">Go to task</button>
+  </div>
+
+  <div class="group" aria-label="Project">
+    <label class="field" title="Project start date">Start <input type="date" id="projectStart"></label>
+    <label class="check" title="Weekends are non-working days"><input type="checkbox" id="skipWeekends"> Skip weekends</label>
+  </div>
+
+  <div class="group right">
+    <button data-cmd="undo" title="Undo (Ctrl+Z)">&#8630;</button>
+    <button data-cmd="redo" title="Redo (Ctrl+Y)">&#8631;</button>
+    <button data-cmd="help" title="How to use Easy Gantt">?</button>
+  </div>
+  <input type="file" id="fileInput" accept=".json,application/json" hidden>
+</header>
+
+<main class="workspace" id="workspace">
+  <section class="grid-pane" id="gridPane">
+    <div class="grid-header" id="gridHeader"></div>
+    <div class="grid-body" id="gridBody" tabindex="0"></div>
+  </section>
+  <div class="splitter" id="splitter" title="Drag to resize"></div>
+  <section class="chart-pane" id="chartPane">
+    <div class="chart-header" id="chartHeader"></div>
+    <div class="chart-body" id="chartBody"></div>
+  </section>
+</main>
+
+<footer class="statusbar" id="statusbar"></footer>
+
+<div class="tooltip" id="tooltip" hidden></div>
+<div class="toast" id="toast" hidden></div>
+
+<dialog id="taskDialog" class="dlg"></dialog>
+<dialog id="linkDialog" class="dlg"></dialog>
+
+<dialog id="helpDialog" class="dlg help">
+  <form method="dialog">
+    <h2>Easy Gantt - quick guide</h2>
+    <div class="help-cols">
+      <div>
+        <h3>Tasks</h3>
+        <ul>
+          <li><b>+ Task</b> (or <kbd>Insert</kbd>) adds a task below the selected row.</li>
+          <li>Click a cell and type, or double-click it, to edit. <kbd>Enter</kbd> saves, <kbd>Esc</kbd> cancels, <kbd>Tab</kbd> moves right.</li>
+          <li>Durations accept <code>5</code>, <code>5d</code>, <code>2w</code>. A duration of <code>0</code> makes a milestone &#9670;.</li>
+          <li>Typing a <b>Start</b> date pins the task to "start no earlier than" that date (shown with &#128204;).</li>
+          <li>Double-click a row or bar for the full <b>Task details</b> window.</li>
+        </ul>
+        <h3>Parent / child (summary) tasks</h3>
+        <ul>
+          <li><b>Indent</b> makes a task a child of the task above it. The parent becomes a <b>summary</b> task.</li>
+          <li>Summary rows roll up start, finish, duration, % done, <b>hours</b> and <b>cost</b> from their children.</li>
+          <li>Row <b>0</b> is the project summary with totals for the whole project.</li>
+          <li>Click &#9662; to collapse or expand a summary.</li>
+        </ul>
+        <h3>Critical path</h3>
+        <ul>
+          <li>Tasks with zero <b>slack</b> (float) are critical and shown in red - delaying them delays the whole project.</li>
+          <li>The Slack column shows how many working days a task can slip without moving the finish date.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Dependencies</h3>
+        <table class="link-help">
+          <tr><td><svg viewBox="0 0 90 34" width="90" height="34"><rect x="2" y="3" width="36" height="10" rx="2" class="hb"/><rect x="48" y="21" width="36" height="10" rx="2" class="hb"/><path d="M38 8 H43 V26 H46" class="ha"/></svg></td><td><b>FS - Finish-to-Start</b><br>B can't start until A finishes. The most common link.</td></tr>
+          <tr><td><svg viewBox="0 0 90 34" width="90" height="34"><rect x="12" y="3" width="36" height="10" rx="2" class="hb"/><rect x="12" y="21" width="50" height="10" rx="2" class="hb"/><path d="M12 8 H6 V26 H10" class="ha"/></svg></td><td><b>SS - Start-to-Start</b><br>B can't start until A starts.</td></tr>
+          <tr><td><svg viewBox="0 0 90 34" width="90" height="34"><rect x="30" y="3" width="44" height="10" rx="2" class="hb"/><rect x="50" y="21" width="24" height="10" rx="2" class="hb"/><path d="M74 8 H82 V26 H76" class="ha"/></svg></td><td><b>FF - Finish-to-Finish</b><br>B can't finish until A finishes.</td></tr>
+          <tr><td><svg viewBox="0 0 90 34" width="90" height="34"><rect x="46" y="3" width="36" height="10" rx="2" class="hb"/><rect x="6" y="21" width="40" height="10" rx="2" class="hb"/><path d="M46 8 H40 V20 H52 V26 H48" class="ha"/></svg></td><td><b>SF - Start-to-Finish</b><br>B can't finish until A starts (e.g. hand-over shifts).</td></tr>
+        </table>
+        <h3>Three ways to link tasks</h3>
+        <ol>
+          <li><b>Drag on the chart:</b> hover a bar, drag from a round handle at its start or end onto another bar's start or end half. The type is chosen from the ends you connect.</li>
+          <li><b>Toolbar:</b> select rows with <kbd>Ctrl</kbd>/<kbd>Shift</kbd>-click, pick a type, press <b>Link</b> (<kbd>Ctrl+L</kbd>).</li>
+          <li><b>Predecessors column:</b> type row numbers, e.g. <code>3</code>, <code>3SS</code>, <code>2FS+2d</code>, <code>4FF-1d</code>.</li>
+        </ol>
+        <p>Click a link arrow on the chart to change its type or lag, or delete it.</p>
+        <h3>Shortcuts</h3>
+        <p><kbd>Ctrl+Z</kbd>/<kbd>Ctrl+Y</kbd> undo/redo &middot; <kbd>Alt+Shift+&rarr;/&larr;</kbd> indent/outdent &middot; <kbd>Alt+Shift+&uarr;/&darr;</kbd> move &middot; <kbd>Delete</kbd> delete &middot; <kbd>Ctrl+S</kbd> save</p>
+        <p class="muted">Your work is saved automatically in this browser. Use <b>Save</b> to keep a .json file you can open anywhere.</p>
+      </div>
+    </div>
+    <div class="dlg-buttons"><button value="close" class="primary">Got it</button></div>
+  </form>
+</dialog>
+
+<script src="scheduler.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
