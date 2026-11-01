@@ -18,19 +18,39 @@
 
   /* ----------------------------------------------------------- columns */
 
-  var COLUMNS = [
-    { key: 'id', title: 'ID', width: 40 },
-    { key: 'name', title: 'Task Name', width: 230 },
+  var C_ID = { key: 'id', title: 'ID', width: 40 };
+  var C_NAME = { key: 'name', title: 'Task Name', width: 230 };
+  var C_PCT = { key: 'pct', title: '% Done', width: 58, num: true };
+  var EST_COLUMNS = [
+    C_ID, C_NAME,
     { key: 'duration', title: 'Duration', width: 72, num: true },
     { key: 'start', title: 'Start', width: 96 },
     { key: 'finish', title: 'Finish', width: 96 },
     { key: 'preds', title: 'Predecessors', width: 104 },
-    { key: 'pct', title: '% Done', width: 58, num: true },
-    { key: 'hours', title: 'Hours Est.', width: 70, num: true },
+    C_PCT,
+    { key: 'headcount', title: 'Head-count', width: 60, num: true, tip: 'People working on the task. Hours = days x hours per day x headcount.' },
+    { key: 'hours', title: 'Hours Est.', width: 70, num: true, tip: 'Enter hours or headcount and the other is calculated: hours = days x hours per day x headcount.' },
     { key: 'cost', title: 'Cost Est.', width: 92, num: true },
     { key: 'slack', title: 'Total Slack', width: 62, num: true }
   ];
-  var EDIT_COLS = ['name', 'duration', 'start', 'finish', 'preds', 'pct', 'hours', 'cost'];
+  var ACT_COLUMNS = [
+    C_ID, C_NAME,
+    { key: 'start', title: 'Est. Start', width: 92 },
+    { key: 'actStart', title: 'Actual Start', width: 100 },
+    { key: 'finish', title: 'Est. Finish', width: 92 },
+    { key: 'actFinish', title: 'Actual Finish', width: 100 },
+    { key: 'finishVar', title: 'Finish Var.', width: 62, num: true, tip: 'Working days late (+) or early (-) against the estimated finish.' },
+    C_PCT,
+    { key: 'actHours', title: 'Actual Hours', width: 70, num: true },
+    { key: 'hoursVar', title: 'Hours Var.', width: 68, num: true, tip: 'Actual minus estimated hours, for tasks that have actuals. + is over.' },
+    { key: 'actCost', title: 'Actual Cost', width: 92, num: true },
+    { key: 'costVar', title: 'Cost Var.', width: 88, num: true, tip: 'Actual minus estimated cost, for tasks that have actuals. + is over.' }
+  ];
+  var EDIT_EST = ['name', 'duration', 'start', 'finish', 'preds', 'pct', 'headcount', 'hours', 'cost'];
+  var EDIT_ACT = ['name', 'actStart', 'actFinish', 'pct', 'actHours', 'actCost'];
+  var DATE_COLS = ['start', 'finish', 'actStart', 'actFinish'];
+  function isActual() { return prefs.mode === 'actual'; }
+  function cols() { return isActual() ? ACT_COLUMNS : EST_COLUMNS; }
 
   var ZOOMS = {
     day: { px: 28, top: 'week', bottom: 'day', before: 3, after: 14 },
@@ -51,7 +71,7 @@
   var prefs = loadPrefs();
 
   function loadPrefs() {
-    var p = { zoom: 'week', showCritical: true, gridWidth: null, colWidths: {} };
+    var p = { zoom: 'week', showCritical: true, gridWidth: null, colWidths: {}, mode: 'estimate' };
     try { Object.assign(p, JSON.parse(localStorage.getItem(PREFS_KEY) || '{}')); } catch (e) { /* ignore */ }
     return p;
   }
@@ -63,7 +83,8 @@
   function newTask(fields) {
     return Object.assign({
       id: project.nextId++, name: 'New task', level: 0, duration: 1, snet: null,
-      cost: 0, hours: 0, pct: 0, notes: '', collapsed: false, preds: []
+      cost: 0, headcount: 0, pct: 0, notes: '', collapsed: false, preds: [],
+      actualStart: null, actualFinish: null, actualHours: 0, actualCost: 0
     }, fields || {});
   }
 
@@ -72,7 +93,9 @@
     return {
       version: 1, name: 'New Project',
       start: G.formatDate(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())),
-      skipWeekends: true, nextId: 1, tasks: []
+      skipWeekends: true, hoursPerDay: 8,
+      holidays: { enabled: G.STANDARD_HOLIDAYS.slice(), custom: [] },
+      nextId: 1, tasks: []
     };
   }
 
@@ -91,15 +114,26 @@
     p.name = String(obj.name || 'Untitled Project');
     if (!isNaN(G.parseDate(obj.start))) p.start = obj.start;
     p.skipWeekends = obj.skipWeekends !== false;
+    p.hoursPerDay = G.hoursPerDay(obj);
+    var hc = G.holidayConfig(obj);
+    p.holidays = {
+      enabled: hc.enabled.filter(function (x) { return G.HOLIDAYS.some(function (h) { return h.id === x; }); }),
+      custom: hc.custom.map(function (c) { return { date: c.date, name: String(c.name || 'Holiday') }; })
+    };
+    var validDate = function (d) { return d && !isNaN(G.parseDate(d)) ? d : null; };
     var seen = new Set(), maxId = 0;
     p.tasks = obj.tasks.map(function (t) {
       var id = Number(t.id);
       if (!Number.isFinite(id) || seen.has(id)) id = NaN;
+      var duration = Math.max(0, Math.round(+t.duration || 0));
       return {
         id: id, name: String(t.name == null ? '' : t.name), level: +t.level || 0,
-        duration: Math.max(0, Math.round(+t.duration || 0)),
-        snet: t.snet && !isNaN(G.parseDate(t.snet)) ? t.snet : null,
-        cost: +t.cost || 0, hours: +t.hours || 0, pct: Math.min(100, Math.max(0, +t.pct || 0)),
+        duration: duration,
+        snet: validDate(t.snet),
+        cost: +t.cost || 0, headcount: G.taskHeadcount(t, duration, p.hoursPerDay),
+        pct: Math.min(100, Math.max(0, +t.pct || 0)),
+        actualStart: validDate(t.actualStart), actualFinish: validDate(t.actualFinish),
+        actualHours: Math.max(0, +t.actualHours || 0), actualCost: Math.max(0, +t.actualCost || 0),
         notes: String(t.notes || ''), collapsed: !!t.collapsed,
         preds: Array.isArray(t.preds) ? t.preds.map(function (l) {
           return { id: Number(l.id), type: String(l.type || 'FS').toUpperCase(), lag: Math.round(+l.lag || 0) };
@@ -234,6 +268,8 @@
   function fmtMoney(n) {
     return '$' + (+n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
+  function round(n, dp) { var f = Math.pow(10, dp); return Math.round((+n || 0) * f) / f; }
+  function fmtHead(n) { return (+n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }); }
   function fmtSlack(d) { return d === Infinity ? '' : Math.round(d) + 'd'; }
   function parseNumber(s) {
     var v = parseFloat(String(s).replace(/[$€£¥,\s]/g, ''));
@@ -250,6 +286,12 @@
     $('skipWeekends').checked = !!project.skipWeekends;
     $('zoom').value = prefs.zoom;
     $('showCritical').checked = !!prefs.showCritical;
+    document.querySelectorAll('[data-mode]').forEach(function (b) {
+      var on = b.dataset.mode === (isActual() ? 'actual' : 'estimate');
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    document.body.classList.toggle('actual-mode', isActual());
     var sel = selectedTaskIds();
     setDisabled('undo', !undoStack.length);
     setDisabled('redo', !redoStack.length);
@@ -273,16 +315,16 @@
   /* ------------------------------------------------------------- grid */
 
   function gridTemplate() {
-    return COLUMNS.map(function (c) { return colWidth(c) + 'px'; }).join(' ');
+    return cols().map(function (c) { return colWidth(c) + 'px'; }).join(' ');
   }
   function gridTotalWidth() {
-    return COLUMNS.reduce(function (a, c) { return a + colWidth(c); }, 0);
+    return cols().reduce(function (a, c) { return a + colWidth(c); }, 0);
   }
 
   function renderGridHeader() {
     var h = '<div class="grow" style="grid-template-columns:' + gridTemplate() + ';width:' + gridTotalWidth() + 'px">';
-    COLUMNS.forEach(function (c) {
-      h += '<div class="gcell' + (c.num ? ' num' : '') + (c.key === 'id' ? ' id' : '') + '">' + esc(c.title) +
+    cols().forEach(function (c) {
+      h += '<div class="gcell' + (c.num ? ' num' : '') + (c.key === 'id' ? ' id' : '') + '"' + (c.tip ? ' title="' + esc(c.tip) + '"' : '') + '>' + esc(c.title) +
         '<span class="col-resize" data-col="' + c.key + '"></span></div>';
     });
     $('gridHeader').innerHTML = h + '</div>';
@@ -291,25 +333,43 @@
   function cellEditable(row, col) {
     if (row.project) return col === 'name';
     var r = sched.byId[row.id];
-    if (r.isSummary) return col === 'name' || col === 'preds';
-    return EDIT_COLS.indexOf(col) >= 0;
+    if (r.isSummary) return col === 'name' || (col === 'preds' && !isActual());
+    return (isActual() ? EDIT_ACT : EDIT_EST).indexOf(col) >= 0;
+  }
+
+  /** Display value for a numeric/date column; works for task rows and the project row. */
+  function metricHtml(o, col) {
+    switch (col) {
+      case 'duration': return G.formatDuration(o.duration);
+      case 'start': return fmtDate(o.startMs);
+      case 'finish': return fmtDate(o.finishMs);
+      case 'pct': return Math.round(o.pct) + '%';
+      case 'headcount': return fmtHead(o.headcount);
+      case 'hours': return fmtNum(o.hours);
+      case 'cost': return fmtMoney(o.cost);
+      case 'actStart': return isNaN(o.actStartMs) ? '' : fmtDate(o.actStartMs);
+      case 'actFinish': return isNaN(o.actFinishMs) ? '' : fmtDate(o.actFinishMs);
+      case 'finishVar': return isNaN(o.finishVar) ? '' : varHtml(o.finishVar, function (v) { return Math.round(v) + 'd'; });
+      case 'actHours': return fmtNum(o.actHours);
+      case 'hoursVar': return o.hoursVarKnown ? varHtml(o.hoursVar, fmtNum) : '';
+      case 'actCost': return fmtMoney(o.actCost);
+      case 'costVar': return o.costVarKnown ? varHtml(o.costVar, fmtMoney) : '';
+    }
+    return '';
+  }
+
+  function varHtml(v, fmt) {
+    if (Math.abs(v) < 1e-9) return '<span class="var-zero">0</span>';
+    return '<span class="' + (v > 0 ? 'var-over' : 'var-under') + '">' + (v > 0 ? '+' : '-') + fmt(Math.abs(v)) + '</span>';
   }
 
   function cellHtml(row, col) {
     var showCrit = prefs.showCritical;
     if (row.project) {
-      var P = sched.project;
-      switch (col) {
-        case 'id': return '0';
-        case 'name': return '<span class="toggle blank"></span><span class="name-text">' + esc(project.name) + '</span>';
-        case 'duration': return G.formatDuration(P.duration);
-        case 'start': return fmtDate(P.startMs);
-        case 'finish': return fmtDate(P.finishMs);
-        case 'pct': return Math.round(P.pct) + '%';
-        case 'hours': return fmtNum(P.hours);
-        case 'cost': return fmtMoney(P.cost);
-        default: return '';
-      }
+      if (col === 'id') return '0';
+      if (col === 'name') return '<span class="toggle blank"></span><span class="name-text">' + esc(project.name) + '</span>';
+      if (col === 'preds' || col === 'slack') return '';
+      return metricHtml(sched.project, col);
     }
     var t = row.task, r = sched.byId[t.id];
     switch (col) {
@@ -326,16 +386,10 @@
         return '<span style="width:' + (t.level * 18) + 'px;flex:none"></span>' + tog +
           doneMark + '<span class="name-text">' + esc(t.name) + '</span>' + extras;
       }
-      case 'duration': return G.formatDuration(r.duration);
-      case 'start': return fmtDate(r.startMs);
-      case 'finish': return fmtDate(r.finishMs);
       case 'preds': return esc(G.formatPredecessors(t, idToRow));
-      case 'pct': return Math.round(r.pct) + '%';
-      case 'hours': return fmtNum(r.hours);
-      case 'cost': return fmtMoney(r.cost);
       case 'slack': return '<span class="' + (showCrit && r.critical ? 'crit' : '') + '">' + fmtSlack(r.slack) + '</span>';
     }
-    return '';
+    return metricHtml(r, col);
   }
 
   function renderGrid() {
@@ -347,17 +401,16 @@
       var cls = 'grow' + (row.project ? ' project' : '') + (r && r.isSummary ? ' summary' : '') + (r && r.pct >= 100 ? ' done' : '') +
         (selection.has(row.id) ? ' selected' : '');
       h += '<div class="' + cls + '" data-id="' + row.id + '" style="grid-template-columns:' + tpl + ';width:' + w + 'px">';
-      COLUMNS.forEach(function (c) {
+      cols().forEach(function (c) {
         var ed = cellEditable(row, c.key);
         var cc = 'gcell' + (c.num ? ' num' : '') + (c.key === 'id' ? ' id' : '') +
           (!ed && c.key !== 'id' && c.key !== 'name' ? ' ro' : '') +
           (active.id === row.id && active.col === c.key ? ' active' : '');
         var title = '';
-        if (c.key === 'start' || c.key === 'finish') {
-          var ms = row.project ? (c.key === 'start' ? sched.project.startMs : sched.project.finishMs)
-            : (c.key === 'start' ? r.startMs : r.finishMs);
-          title = ' title="' + fmtLongDate(ms) + '"';
-        }
+        var o = row.project ? sched.project : r;
+        var msKey = { start: 'startMs', finish: 'finishMs', actStart: 'actStartMs', actFinish: 'actFinishMs' }[c.key];
+        if (msKey && !isNaN(o[msKey])) title = ' title="' + fmtLongDate(o[msKey]) + '"';
+        else if (c.key === 'headcount' && (row.project || r.isSummary)) title = ' title="Average headcount over this summary\'s dates"';
         h += '<div class="' + cc + '" data-col="' + c.key + '"' + title + '>' + cellHtml(row, c.key) + '</div>';
       });
       h += '</div>';
@@ -375,7 +428,7 @@
     if (!rowEl) return false;
     var cell = rowEl.querySelector('.gcell[data-col="' + col + '"]');
     var input = document.createElement('input');
-    input.type = (col === 'start' || col === 'finish') ? 'date' : 'text';
+    input.type = DATE_COLS.indexOf(col) >= 0 ? 'date' : 'text';
     input.spellcheck = false;
     input.value = initialText != null ? initialText : editValue(row, col);
     cell.appendChild(input);
@@ -403,8 +456,13 @@
       case 'finish': return fmtDate(r.finishMs);
       case 'preds': return G.formatPredecessors(t, idToRow);
       case 'pct': return String(Math.round(r.pct));
-      case 'hours': return String(t.hours || 0);
+      case 'headcount': return String(round(r.headcount, 4));
+      case 'hours': return String(round(r.hours, 2));
       case 'cost': return String(t.cost || 0);
+      case 'actStart': return t.actualStart || '';
+      case 'actFinish': return t.actualFinish || '';
+      case 'actHours': return String(t.actualHours || 0);
+      case 'actCost': return String(t.actualCost || 0);
     }
     return '';
   }
@@ -463,11 +521,31 @@
           break;
         }
         case 'pct': t.pct = Math.min(100, Math.max(0, parseNumber(value))); break;
-        case 'hours': t.hours = Math.max(0, parseNumber(value)); break;
+        case 'headcount': t.headcount = Math.max(0, parseNumber(value)); break;
+        case 'hours': t.headcount = headcountFromHours(Math.max(0, parseNumber(value)), r.duration); break;
         case 'cost': t.cost = Math.max(0, parseNumber(value)); break;
+        case 'actStart': case 'actFinish': {
+          var v = value.trim() || null;
+          if (v && isNaN(G.parseDate(v))) throw new Error('Please enter a valid date.');
+          if (col === 'actStart') t.actualStart = v; else t.actualFinish = v;
+          if (t.actualStart && t.actualFinish && G.parseDate(t.actualFinish) < G.parseDate(t.actualStart)) {
+            throw new Error('The actual finish cannot be before the actual start.');
+          }
+          if (col === 'actFinish' && v && (+t.pct || 0) < 100) t.pct = 100; // finished = done
+          break;
+        }
+        case 'actHours': t.actualHours = Math.max(0, parseNumber(value)); break;
+        case 'actCost': t.actualCost = Math.max(0, parseNumber(value)); break;
       }
     });
     if (errors.length) toast(errors.join(' '), 'error');
+  }
+
+  /** Hours = days x hours per day x headcount, so headcount = hours / (days x hours per day). */
+  function headcountFromHours(hours, duration) {
+    if (!hours) return 0;
+    if (!duration) throw new Error('Milestones take no time, so they have no hours. Give the task a duration first.');
+    return hours / (duration * G.hoursPerDay(project));
   }
 
   function linkProblem(tree, idx, predId, succId, type) {
@@ -515,7 +593,7 @@
       ensureRowVisible(ni);
     }
     if (dCol) {
-      var keys = COLUMNS.map(function (c) { return c.key; });
+      var keys = cols().map(function (c) { return c.key; });
       var ci = keys.indexOf(active.col);
       var row = rows[rowIndexOf(active.id)];
       for (var k = ci + dCol; k >= 0 && k < keys.length; k += dCol) {
@@ -653,10 +731,15 @@
       '<marker id="arrowCrit" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L8 4 L0 8 z"/></marker>' +
       '</defs>');
 
-    // Background: weekends, grid lines, selection, today
-    if (z.px >= 6 && project.skipWeekends) {
-      for (var ms = view.start; ms < view.end; ms += DAY) {
-        if (G.isWeekend(ms)) h.push('<rect class="weekend" x="' + X(ms) + '" y="0" width="' + Math.ceil(view.px) + '" height="' + height + '"/>');
+    // Background: weekends, holidays, grid lines, selection, today
+    var cal = sched.calendar, dayW = Math.max(2, Math.ceil(view.px));
+    for (var ms = view.start; ms < view.end; ms += DAY) {
+      var hol = cal.holidayName(ms);
+      if (hol) {
+        h.push('<rect class="holiday" x="' + X(ms) + '" y="0" width="' + dayW + '" height="' + height + '"><title>' +
+          esc(hol + ' - ' + fmtLongDate(ms) + ' (no work)') + '</title></rect>');
+      } else if (z.px >= 6 && project.skipWeekends && G.isWeekend(ms)) {
+        h.push('<rect class="weekend" x="' + X(ms) + '" y="0" width="' + dayW + '" height="' + height + '"/>');
       }
     }
     for (var u = unitStart(view.start, z.bottom); u < view.end; u = unitNext(u, z.bottom)) {
@@ -700,31 +783,63 @@
         h.push('<g class="summary-group bar-group' + (isCrit ? ' crit' : '') + selCls + '" data-id="' + row.id + '">');
         h.push('<path class="summary-bar" d="M' + x1 + ' ' + y + ' H' + x2 + ' V' + (y + 11) + ' L' + (x2 - 5) + ' ' + (y + 6) +
           ' H' + (x1 + 5) + ' L' + x1 + ' ' + (y + 11) + ' Z"/>');
+        var sAct = isActual() ? actualSpan(row.project ? sched.project : r) : null;
+        if (sAct) h.push('<rect class="act-summary' + (sAct.open ? ' open' : '') + '" x="' + sAct.x1 + '" y="' + (g.y0 + 22) + '" width="' + Math.max(2, sAct.x2 - sAct.x1) + '" height="4" rx="1"/>');
         if (!row.project) h.push(handles(row.id, g));
-        h.push('<text class="bar-label" x="' + (x2 + 8) + '" y="' + (g.y0 + 19) + '">' + esc(name) + '</text>');
+        h.push('<text class="bar-label" x="' + (Math.max(x2, sAct ? sAct.x2 : 0) + 8) + '" y="' + (g.y0 + 19) + '">' + esc(name) + '</text>');
         h.push('</g>');
         return;
       }
       h.push('<g class="bar-group' + (isCrit ? ' crit' : '') + selCls + '" data-id="' + row.id + '">');
       if (g.kind === 'milestone') {
         var c = g.cx, yc = g.yc;
-        h.push('<path class="milestone" d="M' + c + ' ' + (yc - 8) + ' L' + (c + 8) + ' ' + yc + ' L' + c + ' ' + (yc + 8) + ' L' + (c - 8) + ' ' + yc + ' Z"/>');
+        h.push('<path class="milestone' + (isActual() ? ' plan' : '') + '" d="M' + c + ' ' + (yc - 8) + ' L' + (c + 8) + ' ' + yc + ' L' + c + ' ' + (yc + 8) + ' L' + (c - 8) + ' ' + yc + ' Z"/>');
+        var mAct = isActual() ? actualSpan(r) : null;
+        if (mAct) {
+          var ac = mAct.x1;
+          h.push('<path class="act-ms" d="M' + ac + ' ' + (yc - 6) + ' L' + (ac + 6) + ' ' + yc + ' L' + ac + ' ' + (yc + 6) + ' L' + (ac - 6) + ' ' + yc + ' Z"/>');
+        }
         h.push(handles(row.id, g));
         h.push('<text class="bar-label" x="' + (c + 13) + '" y="' + (yc + 4) + '">' + esc(name) +
           ' <tspan class="muted">' + esc(MONTHS[new Date(r.startMs).getUTCMonth()] + ' ' + new Date(r.startMs).getUTCDate()) + '</tspan></text>');
       } else {
         var bw = Math.max(3, g.x2 - g.x1), by = g.y0 + 8, bh = ROW_H - 16;
-        h.push('<rect class="bar" x="' + g.x1 + '" y="' + by + '" width="' + bw + '" height="' + bh + '" rx="3"/>');
-        if (r.pct > 0) h.push('<rect class="bar-progress" x="' + g.x1 + '" y="' + (by + bh / 2 - 2) + '" width="' + (bw * r.pct / 100) + '" height="4" rx="1"/>');
-        h.push('<rect class="resize-zone" x="' + (g.x1 + bw - 5) + '" y="' + by + '" width="8" height="' + bh + '"/>');
+        var labelX = g.x1 + bw + 10;
+        if (isActual()) {
+          // Estimate as a thin grey baseline, actual dates as a bar above it.
+          h.push('<rect class="plan-bar" x="' + g.x1 + '" y="' + (g.y0 + ROW_H - 10) + '" width="' + bw + '" height="5" rx="2"><title>Estimate: ' +
+            esc(fmtLongDate(r.startMs) + ' - ' + fmtLongDate(r.finishMs)) + '</title></rect>');
+          var act = actualSpan(r);
+          if (act) {
+            h.push('<rect class="act-bar' + (act.open ? ' open' : '') + '" x="' + act.x1 + '" y="' + (g.y0 + 6) + '" width="' + Math.max(3, act.x2 - act.x1) + '" height="11" rx="3"/>');
+            labelX = Math.max(labelX, act.x2 + 10);
+          }
+        } else {
+          h.push('<rect class="bar" x="' + g.x1 + '" y="' + by + '" width="' + bw + '" height="' + bh + '" rx="3"/>');
+          if (r.pct > 0) h.push('<rect class="bar-progress" x="' + g.x1 + '" y="' + (by + bh / 2 - 2) + '" width="' + (bw * r.pct / 100) + '" height="4" rx="1"/>');
+          h.push('<rect class="resize-zone" x="' + (g.x1 + bw - 5) + '" y="' + by + '" width="8" height="' + bh + '"/>');
+        }
         h.push(handles(row.id, g));
-        h.push('<text class="bar-label" x="' + (g.x1 + bw + 10) + '" y="' + (g.yc + 4) + '">' + esc(name) + '</text>');
+        h.push('<text class="bar-label" x="' + labelX + '" y="' + (g.yc + 4) + '">' + esc(name) + '</text>');
       }
       h.push('</g>');
     });
 
     h.push('</svg>');
     $('chartBody').innerHTML = h.join('');
+  }
+
+  /**
+   * Pixel span of a task's actual dates, or null when it has none. A task that
+   * has started but not finished runs to today (or its start, if that is later).
+   */
+  function actualSpan(o) {
+    if (isNaN(o.actStartMs) && isNaN(o.actFinishMs)) return null;
+    // Only a finish recorded: assume it started when estimated (or on the finish, if earlier).
+    var s0 = !isNaN(o.actStartMs) ? o.actStartMs : Math.min(o.startMs, o.actFinishMs);
+    var open = isNaN(o.actFinishMs);
+    var f = open ? Math.max(G.todayUTC(), s0) : o.actFinishMs;
+    return { x1: X(s0), x2: X(f + DAY), open: open };
   }
 
   function selectionRects(width) {
@@ -764,15 +879,25 @@
 
   function renderStatus() {
     var P = sched.project;
-    $('statusbar').innerHTML =
-      '<span>Start <b>' + fmtLongDate(P.startMs) + '</b></span>' +
-      '<span>Finish <b>' + fmtLongDate(P.finishMs) + '</b></span>' +
-      '<span>Duration <b>' + G.formatDuration(P.duration) + '</b></span>' +
-      '<span>Hours <b>' + fmtNum(P.hours) + '</b></span>' +
-      '<span>Cost <b>' + fmtMoney(P.cost) + '</b></span>' +
-      '<span>Complete <b>' + Math.round(P.pct) + '%</b></span>' +
-      '<span class="crit">Critical tasks <b>' + P.criticalCount + '</b></span>' +
-      '<span class="hint">Double-click a row or bar for details &middot; drag the dots at bar ends to link tasks &middot; press ? for help</span>';
+    var parts = [
+      '<span>Start <b>' + fmtLongDate(P.startMs) + '</b></span>',
+      '<span>Finish <b>' + fmtLongDate(P.finishMs) + '</b></span>',
+      '<span>Duration <b>' + G.formatDuration(P.duration) + '</b></span>'
+    ];
+    if (isActual()) {
+      parts.push('<span>Hours <b>' + fmtNum(P.actHours) + '</b> actual / ' + fmtNum(P.hours) + ' est.</span>');
+      parts.push('<span>Cost <b>' + fmtMoney(P.actCost) + '</b> actual / ' + fmtMoney(P.cost) + ' est.</span>');
+      if (P.costVarKnown) parts.push('<span>Cost variance <b>' + varHtml(P.costVar, fmtMoney) + '</b></span>');
+    } else {
+      parts.push('<span>Hours <b>' + fmtNum(P.hours) + '</b></span>');
+      parts.push('<span>Cost <b>' + fmtMoney(P.cost) + '</b></span>');
+    }
+    parts.push('<span>Complete <b>' + Math.round(P.pct) + '%</b></span>');
+    parts.push('<span class="crit">Critical tasks <b>' + P.criticalCount + '</b></span>');
+    parts.push('<span class="hint">' + (isActual()
+      ? 'Actual mode: enter actual dates, hours and cost &middot; grey line = estimate, purple bar = actual'
+      : 'Double-click a row or bar for details &middot; drag the dots at bar ends to link tasks &middot; press ? for help') + '</span>');
+    $('statusbar').innerHTML = parts.join('');
   }
 
   function render() {
@@ -992,17 +1117,33 @@
 
   function exportCsv() {
     var q = function (v) { v = String(v == null ? '' : v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
-    var lines = [['ID', 'WBS', 'Outline Level', 'Task Name', 'Summary', 'Milestone', 'Duration (days)', 'Start', 'Finish',
-      'Predecessors', '% Complete', 'Hours Estimate', 'Cost Estimate', 'Total Slack (days)', 'Critical', 'Constraint (Start No Earlier Than)', 'Notes']];
+    var d = function (ms) { return isNaN(ms) ? '' : fmtDate(ms); };
+    var n2 = function (v) { return round(v, 2); };
+    var lines = [['ID', 'WBS', 'Outline Level', 'Task Name', 'Summary', 'Milestone', 'Duration (working days)', 'Start', 'Finish',
+      'Predecessors', '% Complete', 'Headcount', 'Hours Estimate', 'Cost Estimate', 'Actual Start', 'Actual Finish',
+      'Actual Hours', 'Actual Cost', 'Finish Variance (days)', 'Hours Variance', 'Cost Variance',
+      'Total Slack (days)', 'Critical', 'Constraint (Start No Earlier Than)', 'Notes']];
+    var row = function (o) {
+      return [n2(o.headcount), n2(o.hours), o.cost.toFixed(2), d(o.actStartMs), d(o.actFinishMs), n2(o.actHours), o.actCost.toFixed(2),
+        isNaN(o.finishVar) ? '' : o.finishVar, o.hoursVarKnown ? n2(o.hoursVar) : '', o.costVarKnown ? o.costVar.toFixed(2) : ''];
+    };
     var P = sched.project;
-    lines.push([0, '0', 0, project.name, 'Yes', 'No', P.duration, fmtDate(P.startMs), fmtDate(P.finishMs), '',
-      Math.round(P.pct), P.hours, P.cost.toFixed(2), '', '', '', '']);
+    lines.push([0, '0', 0, project.name, 'Yes', 'No', P.duration, fmtDate(P.startMs), fmtDate(P.finishMs), '', Math.round(P.pct)]
+      .concat(row(P), ['', '', '', '']));
     project.tasks.forEach(function (t, i) {
       var r = sched.byId[t.id];
       lines.push([i + 1, r.wbs, t.level + 1, t.name, r.isSummary ? 'Yes' : 'No', r.isMilestone ? 'Yes' : 'No', r.duration,
-        fmtDate(r.startMs), fmtDate(r.finishMs), G.formatPredecessors(t, idToRow), Math.round(r.pct), r.hours,
-        r.cost.toFixed(2), r.slack, r.critical ? 'Yes' : 'No', r.isSummary ? '' : (t.snet || ''), t.notes || '']);
+        fmtDate(r.startMs), fmtDate(r.finishMs), G.formatPredecessors(t, idToRow), Math.round(r.pct)]
+        .concat(row(r), [r.slack, r.critical ? 'Yes' : 'No', r.isSummary ? '' : (t.snet || ''), t.notes || '']));
     });
+    var hol = [];
+    for (var y = new Date(P.startMs).getUTCFullYear(); y <= new Date(P.finishMs).getUTCFullYear(); y++) {
+      G.holidaysInYear(y, G.holidayConfig(project), project.skipWeekends).forEach(function (x) { hol.push(fmtDate(x.ms) + ' ' + x.name); });
+    }
+    lines.push([]);
+    lines.push(['Hours per day', G.hoursPerDay(project)]);
+    lines.push(['Weekends', project.skipWeekends ? 'Non-working' : 'Working']);
+    lines.push(['Holidays (no work)', hol.join('; ')]);
     download(slug(project.name) + '.csv', lines.map(function (l) { return l.map(q).join(','); }).join('\n'), 'text/csv');
   }
 
@@ -1095,11 +1236,23 @@
       '<label class="f">Start no earlier than<span class="inline"><input type="date" name="snet" value="' + esc(isSum ? '' : t.snet || '') + '"' + (isSum ? ' disabled' : '') + '>' +
       '<button type="button" data-clear-snet' + (isSum ? ' disabled' : '') + '>Clear</button></span></label>' +
       '<label class="f">% Complete<input name="pct" type="number" min="0" max="100" value="' + Math.round(r.pct) + '"' + (isSum ? ' disabled' : '') + '></label>' +
-      '<label class="f">Hours estimate<input name="hours" type="number" min="0" step="any" value="' + (isSum ? r.hours : t.hours || 0) + '"' + (isSum ? ' disabled title="Sum of subtasks"' : '') + '></label>' +
-      '<label class="f">Cost estimate ($)<input name="cost" type="number" min="0" step="any" value="' + (isSum ? r.cost : t.cost || 0) + '"' + (isSum ? ' disabled title="Sum of subtasks"' : '') + '></label>' +
       '<label class="f">Outline (WBS)<input value="' + r.wbs + '" disabled></label>' +
-      '<label class="f full">Notes<textarea name="notes">' + esc(t.notes || '') + '</textarea></label>' +
       '</div>' +
+      '<h3>Estimate</h3>' +
+      '<div class="form-grid three">' +
+      '<label class="f">Headcount<input name="headcount" type="number" min="0" step="any" value="' + round(r.headcount, 4) + '"' + (isSum ? ' disabled title="Average over the summary\'s dates"' : '') + '></label>' +
+      '<label class="f">Hours estimate<input name="hours" type="number" min="0" step="any" value="' + round(r.hours, 2) + '"' + (isSum ? ' disabled title="Sum of subtasks"' : '') + '></label>' +
+      '<label class="f">Cost estimate ($)<input name="cost" type="number" min="0" step="any" value="' + (isSum ? r.cost : t.cost || 0) + '"' + (isSum ? ' disabled title="Sum of subtasks"' : '') + '></label>' +
+      '</div>' +
+      (isSum ? '' : '<div class="type-desc" id="hoursHint"></div>') +
+      '<h3>Actual</h3>' +
+      '<div class="form-grid four">' +
+      '<label class="f">Actual start<input type="date" name="actualStart" value="' + (isSum ? (isNaN(r.actStartMs) ? '' : fmtDate(r.actStartMs)) : esc(t.actualStart || '')) + '"' + (isSum ? ' disabled' : '') + '></label>' +
+      '<label class="f">Actual finish<input type="date" name="actualFinish" value="' + (isSum ? (isNaN(r.actFinishMs) ? '' : fmtDate(r.actFinishMs)) : esc(t.actualFinish || '')) + '"' + (isSum ? ' disabled' : '') + '></label>' +
+      '<label class="f">Actual hours<input name="actualHours" type="number" min="0" step="any" value="' + (isSum ? round(r.actHours, 2) : t.actualHours || 0) + '"' + (isSum ? ' disabled' : '') + '></label>' +
+      '<label class="f">Actual cost ($)<input name="actualCost" type="number" min="0" step="any" value="' + (isSum ? r.actCost : t.actualCost || 0) + '"' + (isSum ? ' disabled' : '') + '></label>' +
+      '</div>' +
+      '<div class="form-grid"><label class="f full">Notes<textarea name="notes">' + esc(t.notes || '') + '</textarea></label></div>' +
       '<div class="stats">' +
       '<div><span>Start</span>' + fmtLongDate(r.startMs) + '</div>' +
       '<div><span>Finish</span>' + fmtLongDate(r.finishMs) + '</div>' +
@@ -1150,6 +1303,26 @@
       succs.splice(+b.dataset.rms, 1);
       dlg.querySelector('#succRows').innerHTML = succRows();
     };
+    // Headcount <-> hours: hours = days x hours per day x headcount.
+    var hpd = G.hoursPerDay(project);
+    function dlgDays() { var d = G.parseDuration(form.elements.duration.value, project.skipWeekends); return isNaN(d) ? 0 : d; }
+    function hint() {
+      var el = dlg.querySelector('#hoursHint');
+      if (!el) return;
+      var d = dlgDays(), hc = +form.elements.headcount.value || 0;
+      el.textContent = d ? d + ' days x ' + hpd + ' h/day x ' + round(hc, 2) + ' people = ' + fmtNum(d * hpd * hc) + ' hours. Enter either headcount or hours and the other is calculated.'
+        : 'Milestones take no time, so they have no hours.';
+    }
+    if (!isSum) {
+      form.elements.headcount.oninput = function () { form.elements.hours.value = round(dlgDays() * hpd * (+form.elements.headcount.value || 0), 2); hint(); };
+      form.elements.hours.oninput = function () {
+        var d = dlgDays();
+        if (d) form.elements.headcount.value = round((+form.elements.hours.value || 0) / (d * hpd), 4);
+        hint();
+      };
+      form.elements.duration.addEventListener('input', function () { form.elements.headcount.oninput(); });
+      hint();
+    }
     var clr = dlg.querySelector('[data-clear-snet]');
     clr.onclick = function () { form.elements.snet.value = ''; };
     dlg.querySelector('#dlgCancel').onclick = function () { dlg.close(); };
@@ -1165,6 +1338,9 @@
       var f = form.elements;
       var dur = isSum ? null : G.parseDuration(f.duration.value, project.skipWeekends);
       if (!isSum && isNaN(dur)) { errEl.textContent = 'Duration should look like 5, 5d or 2w.'; return; }
+      var aS = f.actualStart && f.actualStart.value, aF = f.actualFinish && f.actualFinish.value;
+      if (!isSum && aS && aF && G.parseDate(aF) < G.parseDate(aS)) { errEl.textContent = 'The actual finish cannot be before the actual start.'; return; }
+      if (!isSum && !dur && +f.hours.value > 0) { errEl.textContent = 'Milestones take no time, so they have no hours.'; return; }
       var seen = new Set();
       var tree2 = G.buildTree(project.tasks);
       var idx2 = new Map(project.tasks.map(function (x, n) { return [x.id, n]; }));
@@ -1183,8 +1359,13 @@
           tt.duration = dur;
           tt.snet = f.snet.value || null;
           tt.pct = Math.min(100, Math.max(0, +f.pct.value || 0));
-          tt.hours = Math.max(0, +f.hours.value || 0);
+          tt.headcount = Math.max(0, +f.headcount.value || 0);
           tt.cost = Math.max(0, +f.cost.value || 0);
+          tt.actualStart = aS || null;
+          tt.actualFinish = aF || null;
+          if (aF && tt.pct < 100) tt.pct = 100;
+          tt.actualHours = Math.max(0, +f.actualHours.value || 0);
+          tt.actualCost = Math.max(0, +f.actualCost.value || 0);
         }
         tt.preds = preds.map(function (l) { return { id: l.id, type: l.type, lag: l.lag }; });
         project.tasks.forEach(function (s) {
@@ -1246,6 +1427,106 @@
     dlg.showModal();
   }
 
+  function openCalendarDialog() {
+    var dlg = $('calDialog');
+    var cfg = G.holidayConfig(project);
+    var enabled = new Set(cfg.enabled);
+    var custom = cfg.custom.map(function (c) { return { date: c.date, name: c.name }; });
+    var y0 = new Date(sched.project.startMs).getUTCFullYear();
+    var y1 = Math.min(new Date(sched.project.finishMs).getUTCFullYear(), y0 + 4);
+
+    function datesFor(h, skip) {
+      var out = [];
+      for (var y = y0; y <= y1; y++) {
+        G.holidaysInYear(y, { enabled: [h.id], custom: [] }, skip).forEach(function (x) {
+          var dd = new Date(x.ms);
+          out.push(WEEKDAYS[dd.getUTCDay()] + ' ' + MONTHS[dd.getUTCMonth()] + ' ' + dd.getUTCDate() + ', ' + dd.getUTCFullYear());
+        });
+      }
+      return out.join(' &middot; ');
+    }
+    function holidayRows(skip) {
+      return G.HOLIDAYS.map(function (h) {
+        return '<tr><td><label class="check"><input type="checkbox" data-hol="' + h.id + '"' + (enabled.has(h.id) ? ' checked' : '') + '> ' +
+          esc(h.name) + (h.standard ? '' : ' <span class="muted">(optional)</span>') + '</label></td><td class="muted">' + datesFor(h, skip) + '</td></tr>';
+      }).join('');
+    }
+    function customRows() {
+      if (!custom.length) return '<tr><td colspan="3" class="empty">No company holidays added.</td></tr>';
+      return custom.map(function (c, n) {
+        return '<tr data-n="' + n + '"><td><input type="date" class="small-date" data-f="date" value="' + esc(c.date) + '"></td>' +
+          '<td><input class="wide" data-f="name" value="' + esc(c.name) + '" placeholder="Name"></td>' +
+          '<td><button type="button" class="danger" data-rm="' + n + '">&#10005;</button></td></tr>';
+      }).join('');
+    }
+    function readCustom() {
+      dlg.querySelectorAll('#customRows tr[data-n]').forEach(function (tr) {
+        var c = custom[+tr.dataset.n];
+        c.date = tr.querySelector('[data-f=date]').value;
+        c.name = tr.querySelector('[data-f=name]').value;
+      });
+    }
+    function readEnabled() {
+      enabled = new Set();
+      dlg.querySelectorAll('[data-hol]').forEach(function (b) { if (b.checked) enabled.add(b.dataset.hol); });
+    }
+
+    dlg.innerHTML =
+      '<form method="dialog" novalidate>' +
+      '<h2>Working calendar</h2>' +
+      '<div class="form-grid">' +
+      '<label class="f">Standard work day (hours)<input name="hpd" type="number" min="1" max="24" step="any" value="' + G.hoursPerDay(project) + '"></label>' +
+      '<label class="check" style="align-self:end;padding-bottom:6px"><input type="checkbox" name="skipWeekends"' + (project.skipWeekends ? ' checked' : '') + '> Weekends are non-working days</label>' +
+      '</div>' +
+      '<div class="type-desc">Estimated hours = working days x hours per day x headcount. Changing the work day recalculates every task\'s hours.</div>' +
+      '<h3>Holidays (no work is done)</h3>' +
+      '<div class="inline-btns"><button type="button" id="holStd">US federal (standard)</button><button type="button" id="holNone">None</button></div>' +
+      '<div class="hol-wrap"><table class="links hol"><tbody id="holRows">' + holidayRows(project.skipWeekends) + '</tbody></table></div>' +
+      '<div class="type-desc">When weekends are non-working, a fixed-date holiday on a Saturday is taken the Friday before and one on a Sunday the Monday after.</div>' +
+      '<h3>Company holidays</h3>' +
+      '<table class="links"><tbody id="customRows">' + customRows() + '</tbody></table>' +
+      '<button type="button" id="addCustom" style="margin-top:6px">+ Add holiday</button>' +
+      '<div class="err" id="calErr"></div>' +
+      '<div class="dlg-buttons"><button type="button" id="calCancel">Cancel</button><button type="submit" class="primary">OK</button></div>' +
+      '</form>';
+
+    var form = dlg.querySelector('form');
+    form.elements.skipWeekends.onchange = function () { readEnabled(); dlg.querySelector('#holRows').innerHTML = holidayRows(form.elements.skipWeekends.checked); };
+    dlg.querySelector('#holStd').onclick = function () { enabled = new Set(G.STANDARD_HOLIDAYS); dlg.querySelector('#holRows').innerHTML = holidayRows(form.elements.skipWeekends.checked); };
+    dlg.querySelector('#holNone').onclick = function () { enabled = new Set(); dlg.querySelector('#holRows').innerHTML = holidayRows(form.elements.skipWeekends.checked); };
+    dlg.querySelector('#addCustom').onclick = function () {
+      readCustom();
+      custom.push({ date: fmtDate(sched.project.startMs), name: 'Company holiday' });
+      dlg.querySelector('#customRows').innerHTML = customRows();
+    };
+    dlg.querySelector('#customRows').onclick = function (e) {
+      var b = e.target.closest('[data-rm]');
+      if (!b) return;
+      readCustom();
+      custom.splice(+b.dataset.rm, 1);
+      dlg.querySelector('#customRows').innerHTML = customRows();
+    };
+    dlg.querySelector('#calCancel').onclick = function () { dlg.close(); };
+    form.onsubmit = function (e) {
+      e.preventDefault();
+      readCustom(); readEnabled();
+      var hpd = +form.elements.hpd.value;
+      if (!(hpd > 0 && hpd <= 24)) { dlg.querySelector('#calErr').textContent = 'A work day must be between 1 and 24 hours.'; return; }
+      var bad = custom.filter(function (c) { return isNaN(G.parseDate(c.date)); });
+      if (bad.length) { dlg.querySelector('#calErr').textContent = 'Every company holiday needs a date.'; return; }
+      mutate(function () {
+        project.hoursPerDay = hpd;
+        project.skipWeekends = form.elements.skipWeekends.checked;
+        project.holidays = {
+          enabled: G.HOLIDAYS.filter(function (h) { return enabled.has(h.id); }).map(function (h) { return h.id; }),
+          custom: custom.map(function (c) { return { date: c.date, name: c.name.trim() || 'Company holiday' }; })
+        };
+      });
+      dlg.close();
+    };
+    dlg.showModal();
+  }
+
   function anyDialogOpen() {
     return !!document.querySelector('dialog[open]');
   }
@@ -1277,14 +1558,22 @@
     if (id === PROJECT_ROW) {
       var P = sched.project;
       return '<b>' + esc(project.name) + '</b><br>' + fmtLongDate(P.startMs) + ' → ' + fmtLongDate(P.finishMs) +
-        '<br>' + G.formatDuration(P.duration) + ' · ' + fmtNum(P.hours) + ' h · ' + fmtMoney(P.cost);
+        '<br>' + G.formatDuration(P.duration) + ' · ' + fmtNum(P.hours) + ' h · ' + fmtMoney(P.cost) + actualTip(P);
     }
     var t = taskById(id), r = sched.byId[id];
     return '<b>' + idToRow(id) + '. ' + esc(t.name) + '</b>' + (r.isSummary ? ' (summary)' : '') +
       '<br>' + fmtLongDate(r.startMs) + (r.isMilestone ? '' : ' → ' + fmtLongDate(r.finishMs)) +
       '<br>' + G.formatDuration(r.duration) + ' · ' + Math.round(r.pct) + '% done' +
-      '<br>' + fmtNum(r.hours) + ' h · ' + fmtMoney(r.cost) +
-      '<br>Slack ' + fmtSlack(r.slack) + (r.critical ? ' · <span style="color:#ff8a8d">critical</span>' : '');
+      '<br>' + (r.isSummary ? '' : fmtHead(r.headcount) + ' people · ') + fmtNum(r.hours) + ' h · ' + fmtMoney(r.cost) +
+      '<br>Slack ' + fmtSlack(r.slack) + (r.critical ? ' · <span style="color:#ff8a8d">critical</span>' : '') + actualTip(r);
+  }
+
+  function actualTip(o) {
+    if (!isActual()) return '';
+    var out = '<br><b>Actual</b> ';
+    out += isNaN(o.actStartMs) ? 'not started' : fmtLongDate(o.actStartMs) + ' → ' + (isNaN(o.actFinishMs) ? 'in progress' : fmtLongDate(o.actFinishMs));
+    out += '<br>' + fmtNum(o.actHours) + ' h · ' + fmtMoney(o.actCost);
+    return out;
   }
 
   /* -------------------------------------------------- chart pointer */
@@ -1335,7 +1624,7 @@
     if (group) {
       var gid = parseId(group.dataset.id);
       lastDown = { id: gid, t: Date.now() };
-      if (gid === PROJECT_ROW || sched.byId[gid].isSummary) {
+      if (gid === PROJECT_ROW || sched.byId[gid].isSummary || isActual()) {
         drag = { mode: 'click', id: gid, sx: e.clientX };
       } else {
         var resize = !!e.target.closest('.resize-zone');
@@ -1453,6 +1742,17 @@
 
   /* ------------------------------------------------------ wiring */
 
+  function setMode(mode) {
+    if (editor) finishEdit(true);
+    prefs.mode = mode === 'actual' ? 'actual' : 'estimate';
+    savePrefs();
+    if (!cols().some(function (c) { return c.key === active.col; })) active.col = 'name';
+    render();
+    toast(isActual()
+      ? 'Actual mode: record actual dates, hours and cost. The grey line under each bar is the estimate.'
+      : 'Estimate mode: plan durations, headcount, hours and cost.');
+  }
+
   function runCommand(cmd) {
     if (editor) finishEdit(true);
     switch (cmd) {
@@ -1481,12 +1781,16 @@
       case 'undo': undo(); break;
       case 'redo': redo(); break;
       case 'help': $('helpDialog').showModal(); break;
+      case 'calendar': openCalendarDialog(); break;
     }
   }
 
   function wire() {
     document.querySelectorAll('[data-cmd]').forEach(function (b) {
       b.addEventListener('click', function () { runCommand(b.dataset.cmd); });
+    });
+    document.querySelectorAll('[data-mode]').forEach(function (b) {
+      b.addEventListener('click', function () { setMode(b.dataset.mode); });
     });
     $('fileInput').addEventListener('change', function (e) {
       if (e.target.files[0]) openFile(e.target.files[0]);
@@ -1589,7 +1893,7 @@
       if (!h) return;
       e.preventDefault();
       var key = h.dataset.col;
-      var col = COLUMNS.find(function (c) { return c.key === key; });
+      var col = cols().find(function (c) { return c.key === key; });
       var sx = e.clientX, sw = colWidth(col);
       h.setPointerCapture(e.pointerId);
       function mv(ev) { prefs.colWidths[key] = Math.max(30, sw + ev.clientX - sx); renderGrid(); }
@@ -1673,5 +1977,5 @@
     selection.add(first); anchorId = first; active.id = first;
     render();
   }
-  window.EasyGantt = { get project() { return project; }, get schedule() { return sched; }, runCommand: runCommand };
+  window.EasyGantt = { get project() { return project; }, get schedule() { return sched; }, runCommand: runCommand, setMode: setMode };
 })();

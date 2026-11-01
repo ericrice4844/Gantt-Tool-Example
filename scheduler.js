@@ -66,57 +66,162 @@
     return g === 0 || g === 6;
   }
 
+  /* ------------------------------------------------------------ holidays */
+
+  function nthWeekday(y, m, wd, n) { // n-th weekday (0=Sun) of month m (0-based)
+    var first = new Date(Date.UTC(y, m, 1)).getUTCDay();
+    return Date.UTC(y, m, 1 + ((wd - first + 7) % 7) + (n - 1) * 7);
+  }
+  function lastWeekday(y, m, wd) {
+    var last = Date.UTC(y, m + 1, 0);
+    return last - ((new Date(last).getUTCDay() - wd + 7) % 7) * DAY;
+  }
+  function fixed(m, d) { return function (y) { return Date.UTC(y, m, d); }; }
+
   /**
-   * Converts between working-day indexes and calendar dates (UTC ms).
-   * Index 0 is the project start (moved to the next weekday when weekends
-   * are non-working).
+   * Holiday definitions. "standard" ones (the 11 US federal holidays) are on by
+   * default. "observed" ones move to Friday/Monday when they fall on a weekend
+   * and weekends are non-working.
    */
-  function Calendar(startStr, skipWeekends) {
-    this.skip = !!skipWeekends;
-    var s = parseDate(startStr);
-    if (isNaN(s)) s = todayUTC();
-    if (this.skip) while (isWeekend(s)) s += DAY;
-    this.start = s;
+  var HOLIDAYS = [
+    { id: 'newyear', name: "New Year's Day", standard: true, observed: true, date: fixed(0, 1) },
+    { id: 'mlk', name: 'Martin Luther King Jr. Day', standard: true, date: function (y) { return nthWeekday(y, 0, 1, 3); } },
+    { id: 'presidents', name: "Presidents' Day", standard: true, date: function (y) { return nthWeekday(y, 1, 1, 3); } },
+    { id: 'memorial', name: 'Memorial Day', standard: true, date: function (y) { return lastWeekday(y, 4, 1); } },
+    { id: 'juneteenth', name: 'Juneteenth', standard: true, observed: true, date: fixed(5, 19) },
+    { id: 'independence', name: 'Independence Day', standard: true, observed: true, date: fixed(6, 4) },
+    { id: 'labor', name: 'Labor Day', standard: true, date: function (y) { return nthWeekday(y, 8, 1, 1); } },
+    { id: 'columbus', name: "Columbus / Indigenous Peoples' Day", standard: true, date: function (y) { return nthWeekday(y, 9, 1, 2); } },
+    { id: 'veterans', name: 'Veterans Day', standard: true, observed: true, date: fixed(10, 11) },
+    { id: 'thanksgiving', name: 'Thanksgiving Day', standard: true, date: function (y) { return nthWeekday(y, 10, 4, 4); } },
+    { id: 'christmas', name: 'Christmas Day', standard: true, observed: true, date: fixed(11, 25) },
+    { id: 'thanksgivingFri', name: 'Day after Thanksgiving', date: function (y) { return nthWeekday(y, 10, 4, 4) + DAY; } },
+    { id: 'christmasEve', name: 'Christmas Eve', date: fixed(11, 24) },
+    { id: 'newyearsEve', name: "New Year's Eve", date: fixed(11, 31) }
+  ];
+  var STANDARD_HOLIDAYS = HOLIDAYS.filter(function (h) { return h.standard; }).map(function (h) { return h.id; });
+
+  /** Holiday settings for a project: { enabled: [ids], custom: [{date, name}] }. Missing = standard set. */
+  function holidayConfig(project) {
+    var h = project && project.holidays;
+    if (!h || typeof h !== 'object') return { enabled: STANDARD_HOLIDAYS.slice(), custom: [] };
+    return {
+      enabled: Array.isArray(h.enabled) ? h.enabled.slice() : STANDARD_HOLIDAYS.slice(),
+      custom: Array.isArray(h.custom) ? h.custom.filter(function (c) { return c && !isNaN(parseDate(c.date)); }) : []
+    };
   }
 
+  /** Holidays that apply in calendar year y as [{ms, name, id}]. */
+  function holidaysInYear(y, cfg, skipWeekends) {
+    var out = [];
+    var on = new Set((cfg && cfg.enabled) || []);
+    HOLIDAYS.forEach(function (h) {
+      if (!on.has(h.id)) return;
+      [y, y + 1].forEach(function (yy) { // an observed Jan 1 can fall on Dec 31 of the year before
+        var ms = h.date(yy);
+        if (skipWeekends && h.observed) {
+          var g = new Date(ms).getUTCDay();
+          if (g === 6) ms -= DAY; else if (g === 0) ms += DAY;
+        }
+        if (new Date(ms).getUTCFullYear() === y) out.push({ ms: ms, name: h.name, id: h.id });
+      });
+    });
+    ((cfg && cfg.custom) || []).forEach(function (c) {
+      var ms = parseDate(c.date);
+      if (new Date(ms).getUTCFullYear() === y) out.push({ ms: ms, name: c.name || 'Holiday', id: 'custom' });
+    });
+    return out.sort(function (a, b) { return a.ms - b.ms; });
+  }
+
+  /* ------------------------------------------------------------ calendar */
+
+  /**
+   * Converts between working-day indexes and calendar dates (UTC ms).
+   * Index 0 is the project start, moved forward to the first working day.
+   * Non-working days are weekends (optional) and holidays (optional).
+   */
+  function Calendar(startStr, skipWeekends, holidays) {
+    this.skip = !!skipWeekends;
+    this.holidayCfg = holidays || { enabled: [], custom: [] };
+    this._years = {};
+    var s = parseDate(startStr);
+    if (isNaN(s)) s = todayUTC();
+    var guard = 0;
+    while (!this.isWorkday(s) && guard++ < 400) s += DAY;
+    this.start = s;
+    this._fwd = [s];   // _fwd[i] = date of working day i
+    this._bwd = [];    // _bwd[k] = date of working day -(k+1)
+  }
+
+  Calendar.prototype._yearMap = function (y) {
+    var m = this._years[y];
+    if (!m) {
+      m = new Map();
+      holidaysInYear(y, this.holidayCfg, this.skip).forEach(function (h) { if (!m.has(h.ms)) m.set(h.ms, h.name); });
+      this._years[y] = m;
+    }
+    return m;
+  };
+
+  /** Name of the holiday on this date, or '' if it is not a holiday. */
+  Calendar.prototype.holidayName = function (ms) {
+    ms = floorDay(ms);
+    return this._yearMap(new Date(ms).getUTCFullYear()).get(ms) || '';
+  };
+
   Calendar.prototype.isWorkday = function (ms) {
-    return !this.skip || !isWeekend(ms);
+    if (this.skip && isWeekend(ms)) return false;
+    return !this.holidayName(ms);
+  };
+
+  Calendar.prototype._extendFwd = function (until) { // until(lastDate, length) -> stop?
+    var f = this._fwd, d = f[f.length - 1], guard = 0;
+    while (!until(f[f.length - 1], f.length) && guard++ < 200000) {
+      d += DAY;
+      if (this.isWorkday(d)) f.push(d);
+    }
+  };
+  Calendar.prototype._extendBwd = function (until) {
+    var b = this._bwd, d = b.length ? b[b.length - 1] : this.start, guard = 0;
+    while (!until(b.length ? b[b.length - 1] : this.start, b.length) && guard++ < 200000) {
+      d -= DAY;
+      if (this.isWorkday(d)) b.push(d);
+    }
   };
 
   /** Working-day index -> date (ms). */
   Calendar.prototype.dateOf = function (i) {
     i = Math.round(i);
-    if (!this.skip) return this.start + i * DAY;
-    var d = this.start;
-    if (i < 0) {
-      var n = -i;
-      while (n > 0) { d -= DAY; if (!isWeekend(d)) n--; }
-      return d;
+    if (i >= 0) {
+      this._extendFwd(function (last, len) { return len > i; });
+      return this._fwd[i];
     }
-    var weeks = Math.floor(i / 5);
-    d += weeks * 7 * DAY;
-    var r = i - weeks * 5;
-    while (r > 0) { d += DAY; if (!isWeekend(d)) r--; }
-    return d;
+    var k = -i - 1;
+    this._extendBwd(function (last, len) { return len > k; });
+    return this._bwd[k];
   };
 
   /** Date (ms) -> index of the first working day on or after it. */
   Calendar.prototype.indexOf = function (ms) {
     ms = floorDay(ms);
-    if (!this.skip) return Math.round((ms - this.start) / DAY);
-    while (isWeekend(ms)) ms += DAY;
-    var d, n;
-    if (ms < this.start) {
-      n = 0; d = ms;
-      while (d < this.start) { if (!isWeekend(d)) n++; d += DAY; }
-      return -n;
+    var guard = 0;
+    while (!this.isWorkday(ms) && guard++ < 400) ms += DAY;
+    var arr, lo, hi, mid;
+    if (ms >= this.start) {
+      this._extendFwd(function (last) { return last >= ms; });
+      arr = this._fwd; lo = 0; hi = arr.length - 1;
+      while (lo < hi) { mid = (lo + hi) >> 1; if (arr[mid] < ms) lo = mid + 1; else hi = mid; }
+      return lo;
     }
-    var days = Math.round((ms - this.start) / DAY);
-    var weeks = Math.floor(days / 7);
-    n = weeks * 5;
-    d = this.start + weeks * 7 * DAY;
-    while (d < ms) { d += DAY; if (!isWeekend(d)) n++; }
-    return n;
+    this._extendBwd(function (last) { return last <= ms; });
+    arr = this._bwd; lo = 0; hi = arr.length - 1; // descending dates
+    while (lo < hi) { mid = (lo + hi) >> 1; if (arr[mid] > ms) lo = mid + 1; else hi = mid; }
+    return -(lo + 1);
+  };
+
+  /** Signed number of working days from date a to date b (positive when b is later). */
+  Calendar.prototype.workdaysBetween = function (a, b) {
+    return this.indexOf(b) - this.indexOf(a);
   };
 
   /* -------------------------------------------------------------- outline */
@@ -250,7 +355,8 @@
   function schedule(project) {
     var tasks = project.tasks;
     normalizeLevels(tasks);
-    var cal = new Calendar(project.start, project.skipWeekends);
+    var cal = new Calendar(project.start, project.skipWeekends, holidayConfig(project));
+    var hpd = hoursPerDay(project);
     var tree = buildTree(tasks);
     var n = tasks.length;
     var idx = new Map(tasks.map(function (t, i) { return [t.id, i]; }));
@@ -385,8 +491,40 @@
     // duration in days, and a milestone counts as one day.
     var wbs = wbsCodes(tasks);
     var byId = {};
-    var firstDay = new Float64Array(n), lastDay = new Float64Array(n);
-    var work = new Float64Array(n), doneWork = new Float64Array(n), allMilestones = [];
+    var agg = new Array(n); // per-task roll-up accumulators
+
+    function rollup(childIdx) {
+      var A = { cost: 0, hours: 0, actHours: 0, actCost: 0, work: 0, done: 0, lo: Infinity, hi: -Infinity,
+        ms: true, aS: NaN, aF: -Infinity, allFin: childIdx.length > 0, slack: Infinity,
+        hv: 0, cv: 0, hvKnown: false, cvKnown: false };
+      childIdx.forEach(function (c) {
+        var g = agg[c], rc = byId[tasks[c].id];
+        A.cost += rc.cost; A.hours += rc.hours; A.actHours += rc.actHours; A.actCost += rc.actCost;
+        A.work += g.work; A.done += g.done; A.ms = A.ms && g.ms;
+        A.lo = Math.min(A.lo, g.lo); A.hi = Math.max(A.hi, g.hi);
+        A.slack = Math.min(A.slack, rc.slack);
+        if (!isNaN(g.aS)) A.aS = isNaN(A.aS) ? g.aS : Math.min(A.aS, g.aS);
+        if (g.allFin) A.aF = Math.max(A.aF, g.aF); else A.allFin = false;
+        A.hv += g.hv; A.cv += g.cv; A.hvKnown = A.hvKnown || g.hvKnown; A.cvKnown = A.cvKnown || g.cvKnown;
+      });
+      if (!A.allFin) A.aF = NaN;
+      return A;
+    }
+
+    function finishFields(r, g) {
+      r.pct = g.work > 0 ? g.done / g.work : 0;
+      r.startMs = cal.dateOf(g.lo);
+      r.finishMs = cal.dateOf(g.hi);
+      r.actStartMs = g.aS;
+      r.actFinishMs = g.aF;
+      r.finishVar = isNaN(g.aF) ? NaN : cal.workdaysBetween(r.finishMs, g.aF);
+      r.startVar = isNaN(g.aS) ? NaN : cal.workdaysBetween(r.startMs, g.aS);
+      // Variances only count tasks that have actuals (or are finished), so work
+      // that has not started yet does not show up as "under budget".
+      r.hoursVar = g.hv; r.costVar = g.cv;
+      r.hoursVarKnown = g.hvKnown; r.costVarKnown = g.cvKnown;
+    }
+
     // Post-order so children are filled before parents.
     for (i = n - 1; i >= 0; i--) {
       var t2 = tasks[i];
@@ -395,40 +533,45 @@
         parentId: tree.parent[i] === -1 ? null : tasks[tree.parent[i]].id,
         childIds: tree.children[i].map(function (c) { return tasks[c].id; })
       };
+      var g;
       if (isSum[i]) {
         var vo = n + i;
         r.es = ES[vo]; r.ef = EF[vo];
         r.ls = LS[i]; r.lf = LF[i];
-        var minSlack = Infinity, cost = 0, hours = 0, lo = Infinity, hi = -Infinity, wk = 0, dw = 0, ms = true;
-        tree.children[i].forEach(function (c) {
-          var rc = byId[tasks[c].id];
-          minSlack = Math.min(minSlack, rc.slack);
-          cost += rc.cost; hours += rc.hours;
-          lo = Math.min(lo, firstDay[c]); hi = Math.max(hi, lastDay[c]);
-          wk += work[c]; dw += doneWork[c]; ms = ms && allMilestones[c];
-        });
-        r.slack = minSlack;
-        r.cost = cost; r.hours = hours;
-        firstDay[i] = lo; lastDay[i] = hi; work[i] = wk; doneWork[i] = dw; allMilestones[i] = ms;
-        r.pct = wk > 0 ? dw / wk : 0;
-        r.duration = ms && hi === lo ? 0 : hi - lo + 1;
+        g = rollup(tree.children[i]);
+        r.slack = g.slack;
+        r.cost = g.cost; r.hours = g.hours; r.actHours = g.actHours; r.actCost = g.actCost;
+        r.duration = g.ms && g.hi === g.lo ? 0 : g.hi - g.lo + 1;
+        r.headcount = r.duration > 0 ? r.hours / (r.duration * hpd) : 0; // average crew over the span
       } else {
         r.es = ES[i]; r.ef = EF[i]; r.ls = LS[i]; r.lf = LF[i];
         r.slack = LF[i] - EF[i];
-        r.cost = +t2.cost || 0; r.hours = +t2.hours || 0;
-        r.pct = Math.min(100, Math.max(0, +t2.pct || 0));
         r.duration = dur[i];
-        firstDay[i] = ES[i];
-        lastDay[i] = dur[i] > 0 ? EF[i] - 1 : ES[i];
-        work[i] = Math.max(dur[i], 1);
-        doneWork[i] = work[i] * r.pct;
-        allMilestones[i] = dur[i] === 0;
+        r.headcount = taskHeadcount(t2, dur[i], hpd);
+        r.hours = dur[i] * hpd * r.headcount;
+        r.cost = +t2.cost || 0;
+        r.actHours = Math.max(0, +t2.actualHours || 0);
+        r.actCost = Math.max(0, +t2.actualCost || 0);
+        var pct = Math.min(100, Math.max(0, +t2.pct || 0));
+        var aS = t2.actualStart ? parseDate(t2.actualStart) : NaN;
+        var aF = t2.actualFinish ? parseDate(t2.actualFinish) : NaN;
+        g = {
+          work: Math.max(dur[i], 1), ms: dur[i] === 0,
+          lo: ES[i], hi: dur[i] > 0 ? EF[i] - 1 : ES[i],
+          aS: aS, aF: aF, allFin: !isNaN(aF)
+        };
+        g.done = g.work * pct;
+        var finished = !isNaN(aF) || pct >= 100;
+        g.hvKnown = r.actHours > 0 || finished;
+        g.cvKnown = r.actCost > 0 || finished;
+        g.hv = g.hvKnown ? r.actHours - r.hours : 0;
+        g.cv = g.cvKnown ? r.actCost - r.cost : 0;
       }
+      agg[i] = g;
+      finishFields(r, g);
       if (Math.abs(r.slack) < EPS) r.slack = 0;
       r.critical = r.slack <= EPS;
       r.isMilestone = !isSum[i] && dur[i] === 0;
-      r.startMs = cal.dateOf(firstDay[i]);
-      r.finishMs = cal.dateOf(lastDay[i]);
       r.constraintMs = !isSum[i] && t2.snet ? parseDate(t2.snet) : NaN;
       byId[t2.id] = r;
     }
@@ -447,33 +590,43 @@
     });
 
     // Project summary (row 0): the same roll-up over the top-level tasks.
-    var P = { cost: 0, hours: 0, work: 0, done: 0, lo: Infinity, hi: -Infinity, ms: true };
-    for (i = 0; i < n; i++) {
-      if (tree.parent[i] !== -1) continue;
-      var rt = byId[tasks[i].id];
-      P.cost += rt.cost; P.hours += rt.hours; P.work += work[i]; P.done += doneWork[i];
-      P.lo = Math.min(P.lo, firstDay[i]); P.hi = Math.max(P.hi, lastDay[i]); P.ms = P.ms && allMilestones[i];
-    }
-    if (!n) { P.lo = 0; P.hi = 0; }
-    var projDur = !n || (P.ms && P.lo === P.hi) ? 0 : P.hi - P.lo + 1;
+    var tops = [];
+    for (i = 0; i < n; i++) if (tree.parent[i] === -1) tops.push(i);
+    var PG = rollup(tops);
+    if (!n) { PG.lo = 0; PG.hi = 0; }
+    var P = {
+      es: PG.lo, ef: projectFinish,
+      duration: !n || (PG.ms && PG.lo === PG.hi) ? 0 : PG.hi - PG.lo + 1,
+      cost: PG.cost, hours: PG.hours, actHours: PG.actHours, actCost: PG.actCost,
+      criticalCount: tasks.filter(function (t, j) { return !isSum[j] && byId[t.id].critical; }).length
+    };
+    P.headcount = P.duration > 0 ? P.hours / (P.duration * hpd) : 0;
+    finishFields(P, PG);
 
     return {
       calendar: cal,
       byId: byId,
       links: outLinks,
       wbs: wbs,
-      project: {
-        es: P.lo,
-        ef: projectFinish,
-        duration: projDur,
-        startMs: cal.dateOf(P.lo),
-        finishMs: cal.dateOf(P.hi),
-        cost: P.cost,
-        hours: P.hours,
-        pct: P.work > 0 ? P.done / P.work : 0,
-        criticalCount: tasks.filter(function (t, j) { return !isSum[j] && byId[t.id].critical; }).length
-      }
+      project: P,
+      hoursPerDay: hpd
     };
+  }
+
+  /** Standard hours in one working day for this project (default 8). */
+  function hoursPerDay(project) {
+    var h = +(project && project.hoursPerDay);
+    return h > 0 && h <= 24 ? h : 8;
+  }
+
+  /**
+   * Estimated headcount for a task. Older files stored only hours, so derive the
+   * headcount from hours / (days x hours per day) when it is missing.
+   */
+  function taskHeadcount(t, duration, hpd) {
+    if (t.headcount != null && t.headcount !== '') return Math.max(0, +t.headcount || 0);
+    var h = +t.hours || 0;
+    return duration > 0 && h > 0 ? h / (duration * hpd) : 0;
   }
 
   /** Full validation for a proposed new link, including cycle detection. */
@@ -562,6 +715,12 @@
     todayUTC: todayUTC,
     isWeekend: isWeekend,
     Calendar: Calendar,
+    HOLIDAYS: HOLIDAYS,
+    STANDARD_HOLIDAYS: STANDARD_HOLIDAYS,
+    holidayConfig: holidayConfig,
+    holidaysInYear: holidaysInYear,
+    hoursPerDay: hoursPerDay,
+    taskHeadcount: taskHeadcount,
     normalizeLevels: normalizeLevels,
     buildTree: buildTree,
     subtreeEnd: subtreeEnd,

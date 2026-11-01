@@ -13,6 +13,11 @@
     <input id="projectName" class="project-name" aria-label="Project name" spellcheck="false">
   </div>
 
+  <div class="mode-switch" role="group" aria-label="Estimate or actual mode" title="Switch between planning estimates and recording actuals">
+    <button type="button" data-mode="estimate">Estimate</button>
+    <button type="button" data-mode="actual">Actual</button>
+  </div>
+
   <div class="group" aria-label="File">
     <button data-cmd="new" title="New project">New</button>
     <button data-cmd="open" title="Open a saved .json project (Ctrl+O)">Open</button>
@@ -61,6 +66,7 @@
   <div class="group" aria-label="Project">
     <label class="field" title="Project start date">Start <input type="date" id="projectStart"></label>
     <label class="check" title="Weekends are non-working days"><input type="checkbox" id="skipWeekends"> Skip weekends</label>
+    <button data-cmd="calendar" title="Holidays, weekends and hours per work day">Calendar&hellip;</button>
   </div>
 
   <div class="group right">
@@ -90,6 +96,7 @@
 
 <dialog id="taskDialog" class="dlg"></dialog>
 <dialog id="linkDialog" class="dlg"></dialog>
+<dialog id="calDialog" class="dlg"></dialog>
 
 <dialog id="helpDialog" class="dlg help">
   <form method="dialog">
@@ -111,6 +118,19 @@
           <li>Summary rows roll up start, finish, duration, % done, <b>hours</b> and <b>cost</b> from their children.</li>
           <li>Row <b>0</b> is the project summary with totals for the whole project.</li>
           <li>Click &#9662; to collapse or expand a summary.</li>
+        </ul>
+        <h3>Estimate and Actual modes</h3>
+        <ul>
+          <li>Use the <b>Estimate / Actual</b> switch at the top left.</li>
+          <li><b>Estimate:</b> plan duration, <b>headcount</b>, hours and cost. Enter either headcount or hours and the other is calculated: <i>hours = days &times; hours per day &times; headcount</i> (20 days &times; 8 h &times; 2 people = 320 h).</li>
+          <li><b>Actual:</b> record actual start and finish dates, hours and cost. Variance columns show what is over (red, +) or under (green, &minus;) the estimate. On the chart, the grey line is the estimate and the purple bar is what really happened.</li>
+          <li>Entering an actual finish marks the task 100% done.</li>
+        </ul>
+        <h3>Holidays and working days</h3>
+        <ul>
+          <li>No work is scheduled on weekends (if skipped) or holidays. Durations count working days only, so a task that crosses a holiday finishes a day later.</li>
+          <li>The 11 US federal holidays are on by default. Use <b>Calendar&hellip;</b> to turn them on or off, add optional or company holidays, and set the hours in a work day.</li>
+          <li>Holidays are shaded on the chart; hover one to see its name.</li>
         </ul>
         <h3>Critical path</h3>
         <ul>

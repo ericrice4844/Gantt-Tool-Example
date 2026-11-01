@@ -156,6 +156,8 @@ function checkRollups(p) {
     const k = kids.map(id => r.byId[id]);
     close(row.cost, k.reduce((a, c) => a + c.cost, 0), label + ' cost');
     close(row.hours, k.reduce((a, c) => a + c.hours, 0), label + ' hours');
+    close(row.actHours, k.reduce((a, c) => a + c.actHours, 0), label + ' actual hours');
+    close(row.actCost, k.reduce((a, c) => a + c.actCost, 0), label + ' actual cost');
     assert.equal(row.startMs, Math.min(...k.map(c => c.startMs)), label + ' start');
     assert.equal(row.finishMs, Math.max(...k.map(c => c.finishMs)), label + ' finish');
     const w = kids.map(leafWork).reduce((a, b) => [a[0] + b[0], a[1] + b[1]], [0, 0]);
@@ -222,5 +224,94 @@ test('the bundled PVE renovation plan rolls up correctly', () => {
   assert.equal(G.formatDate(byName('Purchase & Planning').finishMs), '2026-09-21');
   assert.equal(r.project.cost, 394954);
   assert.equal(G.formatDate(r.project.startMs), '2026-09-08');
-  assert.equal(G.formatDate(r.project.finishMs), '2027-01-03');
+  // "Tucson house on market" (85 working days from Oct 8) skips Columbus Day,
+  // Veterans Day, Thanksgiving, Christmas and New Year's Day.
+  assert.equal(G.formatDate(r.project.finishMs), '2027-01-05');
+});
+
+/* ------------------------------------------------------------ holidays */
+
+test('US federal holiday dates, including observed weekend shifts', () => {
+  const cfg = { enabled: G.STANDARD_HOLIDAYS, custom: [] };
+  const d = (y, skip) => G.holidaysInYear(y, cfg, skip).map(h => G.formatDate(h.ms) + ' ' + h.id);
+  assert.deepEqual(d(2026, true), [
+    '2026-01-01 newyear', '2026-01-19 mlk', '2026-02-16 presidents', '2026-05-25 memorial',
+    '2026-06-19 juneteenth', '2026-07-03 independence', '2026-09-07 labor', '2026-10-12 columbus',
+    '2026-11-11 veterans', '2026-11-26 thanksgiving', '2026-12-25 christmas'
+  ]);
+  // July 4 2026 is a Saturday: observed Friday when weekends are off, the real date when they are worked.
+  assert.ok(d(2026, false).includes('2026-07-04 independence'));
+  // Jan 1 2022 was a Saturday: observed on Fri Dec 31 2021.
+  assert.ok(d(2021, true).includes('2021-12-31 newyear'));
+  assert.ok(!d(2022, true).some(x => x.endsWith('newyear')));
+});
+
+test('tasks do not work on holidays', () => {
+  // Thanksgiving 2025 is Thu Nov 27. A 4-day task starting Tue Nov 25 runs Tue, Wed, Fri, Mon.
+  const p = proj([{ duration: 4, snet: '2025-11-25' }], { start: '2025-11-24' });
+  const r = G.schedule(p);
+  assert.equal(G.formatDate(r.byId[1].startMs), '2025-11-25');
+  assert.equal(G.formatDate(r.byId[1].finishMs), '2025-12-01');
+  // With holidays switched off it runs Tue..Fri.
+  p.holidays = { enabled: [], custom: [] };
+  assert.equal(G.formatDate(G.schedule(p).byId[1].finishMs), '2025-11-28');
+  // A custom holiday and an optional one (day after Thanksgiving).
+  p.holidays = { enabled: ['thanksgiving', 'thanksgivingFri'], custom: [{ date: '2025-12-01', name: 'Shutdown' }] };
+  assert.equal(G.formatDate(G.schedule(p).byId[1].finishMs), '2025-12-03');
+  const cal = G.schedule(p).calendar;
+  assert.equal(cal.holidayName(G.parseDate('2025-12-01')), 'Shutdown');
+  assert.equal(cal.isWorkday(G.parseDate('2025-11-28')), false);
+});
+
+test('a task pinned to a holiday starts the next working day', () => {
+  const r = G.schedule(proj([{ duration: 1, snet: '2025-12-25' }], { start: '2025-12-22' }));
+  assert.equal(G.formatDate(r.byId[1].startMs), '2025-12-26');
+});
+
+test('calendar round-trips across holidays in both directions', () => {
+  const cal = new G.Calendar('2025-06-02', true, { enabled: G.STANDARD_HOLIDAYS, custom: [] });
+  for (let i = -300; i < 600; i++) {
+    const ms = cal.dateOf(i);
+    assert.ok(cal.isWorkday(ms));
+    assert.equal(cal.indexOf(ms), i);
+  }
+});
+
+/* ------------------------------------------------- estimates & actuals */
+
+test('hours = days x hours per day x headcount', () => {
+  const r = G.schedule(proj([{ duration: 20, headcount: 2 }, { duration: 5, headcount: 1.5 }, { duration: 0, headcount: 3 }]));
+  assert.equal(r.byId[1].hours, 320); // 8 x 20 x 2
+  assert.equal(r.byId[2].hours, 60);
+  assert.equal(r.byId[3].hours, 0);   // milestones take no time
+  const p = proj([{ duration: 20, headcount: 2 }], { hoursPerDay: 10 });
+  assert.equal(G.schedule(p).byId[1].hours, 400);
+});
+
+test('older files with only hours get a headcount derived from them', () => {
+  const r = G.schedule(proj([{ duration: 10, hours: 40 }]));
+  assert.equal(r.byId[1].headcount, 0.5);
+  assert.equal(r.byId[1].hours, 40);
+});
+
+test('actuals roll up with variances', () => {
+  const r = checkRollups(proj([
+    { level: 0 },
+    { level: 1, duration: 5, headcount: 1, cost: 1000, actualStart: '2025-01-06', actualFinish: '2025-01-14', actualHours: 60, actualCost: 1200, pct: 100 },
+    { level: 1, duration: 2, headcount: 1, cost: 500, actualStart: '2025-01-08', actualHours: 10, actualCost: 300, pct: 50 }
+  ]));
+  const a = r.byId[2];
+  assert.equal(a.finishVar, 2);          // planned Fri Jan 10, actual Tue Jan 14
+  assert.equal(a.hoursVar, 20);          // 60 actual - 40 estimated
+  assert.equal(a.costVar, 200);
+  const s = r.byId[1];
+  assert.equal(s.actHours, 70); assert.equal(s.actCost, 1500);
+  assert.equal(G.formatDate(s.actStartMs), '2025-01-06');
+  assert.ok(isNaN(s.actFinishMs));       // not every subtask has finished
+  assert.equal(s.hoursVar, 70 - 56); assert.equal(s.costVar, 0);
+  assert.equal(r.project.actCost, 1500);
+  // A task with no actuals yet adds nothing to the variance.
+  const r2 = G.schedule(proj([{ duration: 5, headcount: 1, cost: 900 }]));
+  assert.equal(r2.byId[1].hoursVar, 0); assert.equal(r2.byId[1].hoursVarKnown, false);
+  assert.equal(r2.project.costVar, 0);
 });
