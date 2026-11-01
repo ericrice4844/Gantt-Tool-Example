@@ -25,6 +25,7 @@ The launcher only needs the Python 3 standard library, which most Linux distribu
 | **Critical path** | A full forward/backward-pass (CPM) calculation. Zero-slack tasks and the links that drive them show in red, and the **Total Slack** column shows each task's float. |
 | **Hours and cost estimates** | Entered per task and summed up through every summary level to the project total. |
 | **Scheduling** | Drag bars to move them (this sets a "start no earlier than" constraint 📌), or drag a bar's right edge to change its duration. Weekends can be non-working. |
+| **Mark tasks done** | Select tasks and press **✓ Done**. They turn green with a ✓, and selecting a summary marks all of its subtasks. Press it again to un-mark. Type any value in **% Done** for partial progress, which rolls up through the summaries. |
 | **Task details window** | Double-click a row or bar to edit everything, including the lists of predecessors and successors. |
 | **Files** | Autosaves in the browser. **Save**/**Open** use `.json` files. **Export CSV** works with LibreOffice Calc or Excel. |
 | **Undo / redo** | `Ctrl+Z` / `Ctrl+Y` |
@@ -35,6 +36,7 @@ FF and SF links can't drive a summary task, and links that would create a loop a
 ## Files
 
 - `index.html`, `styles.css`, `app.js` — the user interface
+- `default-project.js` — the project shown the first time the app opens (PVE Home Renovation & Move)
 - `scheduler.js` — the scheduling engine (calendar, outline, CPM, link validation), with no DOM code
 - `gantt.py` — Linux launcher and local web server
 - `tests/scheduler.test.js` — engine tests, run with `node --test tests/*.test.js`

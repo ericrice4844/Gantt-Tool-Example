@@ -23,6 +23,7 @@
   <div class="group" aria-label="Tasks">
     <button data-cmd="addTask" class="primary" title="Insert a task below the selection (Insert)">+ Task</button>
     <button data-cmd="addMilestone" title="Insert a milestone (zero-duration task)">+ Milestone</button>
+    <button data-cmd="markDone" title="Mark the selected tasks as done (100% complete). Press again to un-mark. Selecting a summary marks all its subtasks.">&#10003; Done</button>
     <button data-cmd="details" title="Open task details: dates, costs, notes and dependencies (Enter on the ID column, or double-click)">Details&hellip;</button>
     <button data-cmd="delete" title="Delete selected tasks (Delete)">Delete</button>
   </div>
@@ -102,6 +103,7 @@
           <li>Durations accept <code>5</code>, <code>5d</code>, <code>2w</code>. A duration of <code>0</code> makes a milestone &#9670;.</li>
           <li>Typing a <b>Start</b> date pins the task to "start no earlier than" that date (shown with &#128204;).</li>
           <li>Double-click a row or bar for the full <b>Task details</b> window.</li>
+          <li><b>&#10003; Done</b> marks the selected tasks 100% complete (shown green with a &#10003;). Selecting a summary marks all of its subtasks. You can also type any value in <b>% Done</b> for partial progress.</li>
         </ul>
         <h3>Parent / child (summary) tasks</h3>
         <ul>
@@ -141,6 +143,7 @@
 </dialog>
 
 <script src="scheduler.js"></script>
+<script src="default-project.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -76,38 +76,13 @@
     };
   }
 
+  /** The project shown on first launch, from default-project.js (falls back to an empty project). */
   function sampleProject() {
-    var p = blankProject();
-    p.name = 'Website Launch';
-    var defs = [
-      // name, level, duration, preds, hours, cost, pct
-      ['Planning', 0],
-      ['Kickoff meeting', 1, 1, [], 6, 600, 100],
-      ['Gather requirements', 1, 5, [[2]], 40, 4000, 60],
-      ['Design specification', 1, 4, [[3]], 32, 3200, 0],
-      ['Design sign-off', 1, 0, [[4]], 0, 0, 0],
-      ['Build', 0],
-      ['Frontend', 1],
-      ['Page templates', 2, 6, [[5]], 48, 4800, 0],
-      ['Styling & accessibility', 2, 4, [[8, 'SS', 2]], 32, 3000, 0],
-      ['Backend API', 1, 10, [[5]], 80, 9000, 0],
-      ['Integration', 1, 3, [[7], [10]], 24, 2400, 0],
-      ['Launch', 0],
-      ['QA testing', 1, 5, [[11]], 40, 3500, 0],
-      ['User documentation', 1, 4, [[13, 'FF']], 20, 1500, 0],
-      ['Legacy site support', 1, 3, [[16, 'SF']], 12, 900, 0],
-      ['Go live', 1, 0, [[13], [14]], 0, 0, 0]
-    ];
-    project = p;
-    p.tasks = defs.map(function (d) {
-      return newTask({
-        name: d[0], level: d[1], duration: d[2] || 1, hours: d[4] || 0, cost: d[5] || 0, pct: d[6] || 0,
-        preds: (d[3] || []).map(function (l) { return { id: l[0], type: l[1] || 'FS', lag: l[2] || 0 }; })
-      });
-    });
-    p.tasks[4].duration = 0; p.tasks[15].duration = 0;
-    p.tasks[1].notes = 'Agree goals, scope and owners.';
-    return p;
+    var def = window.EASY_GANTT_DEFAULT_PROJECT;
+    if (def) {
+      try { return normalizeProject(JSON.parse(JSON.stringify(def))); } catch (e) { /* fall through */ }
+    }
+    return blankProject();
   }
 
   function normalizeProject(obj) {
@@ -280,7 +255,7 @@
     setDisabled('redo', !redoStack.length);
     setDisabled('link', sel.length < 2);
     setDisabled('unlink', sel.length < 1);
-    ['delete', 'indent', 'outdent', 'moveUp', 'moveDown', 'scrollToTask', 'details'].forEach(function (c) {
+    ['markDone', 'delete', 'indent', 'outdent', 'moveUp', 'moveDown', 'scrollToTask', 'details'].forEach(function (c) {
       setDisabled(c, !sel.length);
     });
     document.title = project.name + ' - Easy Gantt';
@@ -344,11 +319,12 @@
           ? '<span class="toggle" data-toggle="' + t.id + '" title="' + (t.collapsed ? 'Expand' : 'Collapse') + '">' + (t.collapsed ? '&#9656;' : '&#9662;') + '</span>'
           : '<span class="toggle blank"></span>';
         var extras = '';
+        var doneMark = r.pct >= 100 ? '<span class="done-mark" title="Done">&#10003;</span>' : '';
         if (r.isMilestone) extras += '<span class="ms" title="Milestone">&#9670;</span>';
         if (t.snet && !r.isSummary) extras += '<span class="pin" title="Start no earlier than ' + esc(t.snet) + '">&#128204;</span>';
         if (t.notes) extras += '<span class="note" title="' + esc(t.notes) + '">&#9998;</span>';
         return '<span style="width:' + (t.level * 18) + 'px;flex:none"></span>' + tog +
-          '<span class="name-text">' + esc(t.name) + '</span>' + extras;
+          doneMark + '<span class="name-text">' + esc(t.name) + '</span>' + extras;
       }
       case 'duration': return G.formatDuration(r.duration);
       case 'start': return fmtDate(r.startMs);
@@ -368,7 +344,7 @@
     var h = '';
     rows.forEach(function (row) {
       var r = row.project ? null : sched.byId[row.id];
-      var cls = 'grow' + (row.project ? ' project' : '') + (r && r.isSummary ? ' summary' : '') +
+      var cls = 'grow' + (row.project ? ' project' : '') + (r && r.isSummary ? ' summary' : '') + (r && r.pct >= 100 ? ' done' : '') +
         (selection.has(row.id) ? ' selected' : '');
       h += '<div class="' + cls + '" data-id="' + row.id + '" style="grid-template-columns:' + tpl + ';width:' + w + 'px">';
       COLUMNS.forEach(function (c) {
@@ -718,7 +694,7 @@
       var r = row.project ? null : sched.byId[row.id];
       var name = row.project ? project.name : row.task.name;
       var isCrit = crit && r && r.critical;
-      var selCls = selection.has(row.id) ? ' selected' : '';
+      var selCls = (selection.has(row.id) ? ' selected' : '') + (r && r.pct >= 100 ? ' done' : '');
       if (g.kind === 'summary') {
         var y = g.y0 + 9, x1 = g.x1, x2 = Math.max(g.x2, g.x1 + 2);
         h.push('<g class="summary-group bar-group' + (isCrit ? ' crit' : '') + selCls + '" data-id="' + row.id + '">');
@@ -910,6 +886,23 @@
         tasks.splice.apply(tasks, [insertAt, 0].concat(block));
       }
     });
+  }
+
+  /** Mark the selected tasks (and everything under a selected summary) 100% done, or back to 0% if all are already done. */
+  function toggleDone() {
+    var ids = selectedTaskIds();
+    if (!ids.length) { toast('Select one or more tasks first.'); return; }
+    var leaves = [];
+    ids.forEach(function (id) {
+      var i = indexOfId(id), end = G.subtreeEnd(project.tasks, i);
+      for (var k = i; k < end; k++) {
+        var tid = project.tasks[k].id;
+        if (!sched.byId[tid].isSummary && leaves.indexOf(tid) < 0) leaves.push(tid);
+      }
+    });
+    var allDone = leaves.every(function (id) { return (+taskById(id).pct || 0) >= 100; });
+    mutate(function () { leaves.forEach(function (id) { taskById(id).pct = allDone ? 0 : 100; }); });
+    toast((allDone ? 'Marked not done: ' : 'Marked done: ') + leaves.length + ' task' + (leaves.length === 1 ? '' : 's') + '.');
   }
 
   function linkSelected() {
@@ -1478,6 +1471,7 @@
       case 'outdent': shiftLevel(-1); break;
       case 'moveUp': moveSelected(-1); break;
       case 'moveDown': moveSelected(1); break;
+      case 'markDone': toggleDone(); break;
       case 'link': linkSelected(); break;
       case 'unlink': unlinkSelected(); break;
       case 'scrollToTask': scrollToTask(); break;

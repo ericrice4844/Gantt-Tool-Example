@@ -21,6 +21,8 @@
   --link: #7c8598;
   --weekend: #f1f2f5;
   --today: #f59e0b;
+  --done: #2f9e5b;
+  --done-dark: #1f7a43;
   --summary-row: #f3f5f9;
   --input-bg: #ffffff;
   --shadow: 0 6px 24px rgba(20, 30, 50, .18);
@@ -155,6 +157,11 @@ label.check, label.field { display: flex; align-items: center; gap: 4px; white-s
 .bar-progress { fill: var(--bar-progress); pointer-events: none; }
 .bar-group.crit .bar { fill: var(--critical); stroke: var(--critical-dark); }
 .bar-group.crit .bar-progress { fill: var(--critical-progress); }
+.bar-group.done .bar { fill: var(--done); stroke: var(--done-dark); }
+.bar-group.done .milestone { fill: var(--done); }
+.bar-group.done .bar-progress { fill: var(--done-dark); }
+.gcell .done-mark { color: var(--done); font-weight: 700; margin-right: 5px; flex: none; }
+.grow.done .name-text { color: var(--muted); }
 .bar-group.selected .bar { stroke: var(--text); stroke-width: 2; }
 .resize-zone { fill: transparent; cursor: ew-resize; }
 .summary-bar { fill: var(--summary); }
