@@ -139,3 +139,88 @@ test('WBS codes follow the outline', () => {
   const p = proj([{ level: 0 }, { level: 1 }, { level: 2 }, { level: 1 }, { level: 0 }]);
   assert.deepEqual(G.schedule(p).wbs, ['1', '1.1', '1.1.1', '1.2', '2']);
 });
+
+/* ------------------------------------------------------------ roll-ups */
+
+// Checks every summary row (and the project row) against the rows directly under it.
+function checkRollups(p) {
+  const r = G.schedule(p);
+  assert.ok(!r.error, r.error);
+  const close = (a, b, what) => assert.ok(Math.abs(a - b) < 1e-6, what + ': ' + a + ' vs ' + b);
+  const leafWork = id => {
+    const x = r.byId[id];
+    if (!x.isSummary) return [Math.max(x.duration, 1), Math.max(x.duration, 1) * x.pct];
+    return x.childIds.map(leafWork).reduce((a, b) => [a[0] + b[0], a[1] + b[1]], [0, 0]);
+  };
+  const check = (label, kids, row) => {
+    const k = kids.map(id => r.byId[id]);
+    close(row.cost, k.reduce((a, c) => a + c.cost, 0), label + ' cost');
+    close(row.hours, k.reduce((a, c) => a + c.hours, 0), label + ' hours');
+    assert.equal(row.startMs, Math.min(...k.map(c => c.startMs)), label + ' start');
+    assert.equal(row.finishMs, Math.max(...k.map(c => c.finishMs)), label + ' finish');
+    const w = kids.map(leafWork).reduce((a, b) => [a[0] + b[0], a[1] + b[1]], [0, 0]);
+    close(row.pct, w[1] / w[0], label + ' % done');
+  };
+  Object.values(r.byId).filter(x => x.isSummary).forEach(x => check('task ' + (x.index + 1), x.childIds, x));
+  const top = Object.values(r.byId).filter(x => x.parentId === null).map(x => x.id);
+  if (top.length) check('project', top, r.project);
+  return r;
+}
+
+test('summary finishes on its last milestone, not the day before', () => {
+  const r = checkRollups(proj([
+    { level: 0 },
+    { level: 1, duration: 0, snet: '2025-01-06' },
+    { level: 1, duration: 0, snet: '2025-01-13' }
+  ]));
+  assert.equal(G.formatDate(r.byId[1].startMs), '2025-01-06');
+  assert.equal(G.formatDate(r.byId[1].finishMs), '2025-01-13');
+  assert.equal(r.byId[1].duration, 6); // Mon..next Mon inclusive, working days
+  assert.equal(G.formatDate(r.project.finishMs), '2025-01-13');
+});
+
+test('% done counts milestones and weights nested summaries by their work', () => {
+  const r = checkRollups(proj([
+    { level: 0 },
+    { level: 1 },                                   // 2: summary of two parallel 10-day tasks
+    { level: 2, duration: 10, pct: 100 },
+    { level: 2, duration: 10, pct: 0 },
+    { level: 1, duration: 10, pct: 0 },             // 5
+    { level: 1, duration: 0, pct: 100 }             // 6: done milestone counts as 1 day
+  ]));
+  assert.equal(r.byId[2].pct, 50);
+  // work: 10 + 10 + 10 + 1 = 31, done: 10 + 1 = 11
+  assert.ok(Math.abs(r.byId[1].pct - 1100 / 31) < 1e-9);
+});
+
+test('roll-ups hold for every summary in randomly generated projects', () => {
+  let seed = 7;
+  const rnd = n => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
+  for (let k = 0; k < 300; k++) {
+    const n = 1 + rnd(25), tasks = [];
+    let lv = 0;
+    for (let i = 0; i < n; i++) {
+      lv = Math.max(0, Math.min(lv + rnd(3) - 1, i ? tasks[i - 1].level + 1 : 0));
+      const t = { level: lv, duration: rnd(4) === 0 ? 0 : 1 + rnd(12), cost: rnd(5000), hours: rnd(80), pct: [0, 0, 25, 50, 100][rnd(5)] };
+      if (rnd(3) === 0) t.snet = G.formatDate(G.parseDate('2025-01-06') + rnd(40) * G.DAY);
+      if (i && rnd(2) === 0) t.preds = [L(1 + rnd(i), G.LINK_TYPES[rnd(4)], rnd(5) - 2)];
+      tasks.push(t);
+    }
+    const p = proj(tasks, { skipWeekends: rnd(2) === 0 });
+    G.sanitize(p);
+    checkRollups(p);
+  }
+});
+
+test('the bundled PVE renovation plan rolls up correctly', () => {
+  global.window = {};
+  require('../default-project.js');
+  const p = JSON.parse(JSON.stringify(global.window.EASY_GANTT_DEFAULT_PROJECT));
+  delete global.window;
+  const r = checkRollups(p);
+  const byName = n => Object.values(r.byId).find(x => p.tasks[x.index].name === n);
+  assert.equal(G.formatDate(byName('Purchase & Planning').finishMs), '2026-09-21');
+  assert.equal(r.project.cost, 394954);
+  assert.equal(G.formatDate(r.project.startMs), '2026-09-08');
+  assert.equal(G.formatDate(r.project.finishMs), '2027-01-03');
+});

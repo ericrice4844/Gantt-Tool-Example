@@ -379,10 +379,14 @@
       LS[v] = cap - pDur;
     }
 
-    // Results
+    // Results. Roll-ups use each task's first and last calendar day, so a summary
+    // always starts with its earliest child and finishes with its latest child
+    // (milestones included). % complete is weighted by work: each leaf counts its
+    // duration in days, and a milestone counts as one day.
     var wbs = wbsCodes(tasks);
     var byId = {};
-    var slack = new Float64Array(n);
+    var firstDay = new Float64Array(n), lastDay = new Float64Array(n);
+    var work = new Float64Array(n), doneWork = new Float64Array(n), allMilestones = [];
     // Post-order so children are filled before parents.
     for (i = n - 1; i >= 0; i--) {
       var t2 = tasks[i];
@@ -395,31 +399,37 @@
         var vo = n + i;
         r.es = ES[vo]; r.ef = EF[vo];
         r.ls = LS[i]; r.lf = LF[i];
-        var minSlack = Infinity, cost = 0, hours = 0, wsum = 0, wdur = 0, plain = 0;
+        var minSlack = Infinity, cost = 0, hours = 0, lo = Infinity, hi = -Infinity, wk = 0, dw = 0, ms = true;
         tree.children[i].forEach(function (c) {
           var rc = byId[tasks[c].id];
           minSlack = Math.min(minSlack, rc.slack);
           cost += rc.cost; hours += rc.hours;
-          wsum += rc.pct * rc.duration; wdur += rc.duration; plain += rc.pct;
+          lo = Math.min(lo, firstDay[c]); hi = Math.max(hi, lastDay[c]);
+          wk += work[c]; dw += doneWork[c]; ms = ms && allMilestones[c];
         });
         r.slack = minSlack;
         r.cost = cost; r.hours = hours;
-        r.pct = wdur > 0 ? wsum / wdur : plain / tree.children[i].length;
-        r.duration = r.ef - r.es;
+        firstDay[i] = lo; lastDay[i] = hi; work[i] = wk; doneWork[i] = dw; allMilestones[i] = ms;
+        r.pct = wk > 0 ? dw / wk : 0;
+        r.duration = ms && hi === lo ? 0 : hi - lo + 1;
       } else {
         r.es = ES[i]; r.ef = EF[i]; r.ls = LS[i]; r.lf = LF[i];
         r.slack = LF[i] - EF[i];
         r.cost = +t2.cost || 0; r.hours = +t2.hours || 0;
         r.pct = Math.min(100, Math.max(0, +t2.pct || 0));
         r.duration = dur[i];
+        firstDay[i] = ES[i];
+        lastDay[i] = dur[i] > 0 ? EF[i] - 1 : ES[i];
+        work[i] = Math.max(dur[i], 1);
+        doneWork[i] = work[i] * r.pct;
+        allMilestones[i] = dur[i] === 0;
       }
       if (Math.abs(r.slack) < EPS) r.slack = 0;
       r.critical = r.slack <= EPS;
       r.isMilestone = !isSum[i] && dur[i] === 0;
-      r.startMs = cal.dateOf(r.es);
-      r.finishMs = r.duration > 0 ? cal.dateOf(r.ef - 1) : r.startMs;
+      r.startMs = cal.dateOf(firstDay[i]);
+      r.finishMs = cal.dateOf(lastDay[i]);
       r.constraintMs = !isSum[i] && t2.snet ? parseDate(t2.snet) : NaN;
-      slack[i] = r.slack;
       byId[t2.id] = r;
     }
 
@@ -436,16 +446,16 @@
       };
     });
 
-    var totals = { cost: 0, hours: 0, wsum: 0, wdur: 0 };
-    var minStart = n ? Infinity : 0;
+    // Project summary (row 0): the same roll-up over the top-level tasks.
+    var P = { cost: 0, hours: 0, work: 0, done: 0, lo: Infinity, hi: -Infinity, ms: true };
     for (i = 0; i < n; i++) {
       if (tree.parent[i] !== -1) continue;
       var rt = byId[tasks[i].id];
-      totals.cost += rt.cost; totals.hours += rt.hours;
-      totals.wsum += rt.pct * Math.max(rt.duration, 0); totals.wdur += Math.max(rt.duration, 0);
-      minStart = Math.min(minStart, rt.es);
+      P.cost += rt.cost; P.hours += rt.hours; P.work += work[i]; P.done += doneWork[i];
+      P.lo = Math.min(P.lo, firstDay[i]); P.hi = Math.max(P.hi, lastDay[i]); P.ms = P.ms && allMilestones[i];
     }
-    var projDur = projectFinish - (n ? Math.min(minStart, projectFinish) : 0);
+    if (!n) { P.lo = 0; P.hi = 0; }
+    var projDur = !n || (P.ms && P.lo === P.hi) ? 0 : P.hi - P.lo + 1;
 
     return {
       calendar: cal,
@@ -453,14 +463,14 @@
       links: outLinks,
       wbs: wbs,
       project: {
-        es: n ? minStart : 0,
+        es: P.lo,
         ef: projectFinish,
         duration: projDur,
-        startMs: cal.dateOf(n ? minStart : 0),
-        finishMs: projDur > 0 ? cal.dateOf(projectFinish - 1) : cal.dateOf(n ? minStart : 0),
-        cost: totals.cost,
-        hours: totals.hours,
-        pct: totals.wdur > 0 ? totals.wsum / totals.wdur : 0,
+        startMs: cal.dateOf(P.lo),
+        finishMs: cal.dateOf(P.hi),
+        cost: P.cost,
+        hours: P.hours,
+        pct: P.work > 0 ? P.done / P.work : 0,
         criticalCount: tasks.filter(function (t, j) { return !isSum[j] && byId[t.id].critical; }).length
       }
     };
