@@ -42,6 +42,11 @@
     <button data-cmd="collapseAll" title="Collapse all summary tasks">&#8863;</button>
   </div>
 
+  <div class="group" aria-label="Resources">
+    <select id="assignResource" title="Assign a resource group to the selected tasks"></select>
+    <button data-cmd="resources" title="Create resource groups and choose their colors">Resources&hellip;</button>
+  </div>
+
   <div class="group" aria-label="Dependencies">
     <select id="linkType" title="Dependency type used by the Link button">
       <option value="FS">Finish-to-Start (FS)</option>
@@ -97,6 +102,7 @@
 <dialog id="taskDialog" class="dlg"></dialog>
 <dialog id="linkDialog" class="dlg"></dialog>
 <dialog id="calDialog" class="dlg"></dialog>
+<dialog id="resDialog" class="dlg"></dialog>
 
 <dialog id="helpDialog" class="dlg help">
   <form method="dialog">
@@ -123,7 +129,7 @@
         <ul>
           <li>Use the <b>Estimate / Actual</b> switch at the top left.</li>
           <li><b>Estimate:</b> plan duration, <b>headcount</b>, hours and cost. Enter either headcount or hours and the other is calculated: <i>hours = days &times; hours per day &times; headcount</i> (20 days &times; 8 h &times; 2 people = 320 h).</li>
-          <li><b>Actual:</b> record actual start and finish dates, hours and cost. Variance columns show what is over (red, +) or under (green, &minus;) the estimate. On the chart, the grey line is the estimate and the purple bar is what really happened.</li>
+          <li><b>Actual:</b> record actual start and finish dates, hours and cost. Variance columns show what is over (red, +) or under (green, &minus;) the estimate. On the chart, the grey line is the estimate and the colored bar is what really happened.</li>
           <li>Entering an actual finish marks the task 100% done.</li>
         </ul>
         <h3>Holidays and working days</h3>
@@ -132,9 +138,15 @@
           <li>The 11 US federal holidays are on by default. Use <b>Calendar&hellip;</b> to turn them on or off, add optional or company holidays, and set the hours in a work day.</li>
           <li>Holidays are shaded on the chart; hover one to see its name.</li>
         </ul>
+        <h3>Resource groups and colors</h3>
+        <ul>
+          <li>Give each task a <b>resource group</b> (e.g. Sim, Software, GNC, Hardware) and its bar is drawn in that group's color. Tasks without a group are light blue.</li>
+          <li>Type a group name in the <b>Resource</b> column (a new name creates the group), pick one in <b>Assign resource</b> for all selected rows, or use Task details. Assigning a summary assigns all of its subtasks.</li>
+          <li><b>Resources&hellip;</b> sets each group's name and color and shows its tasks, hours and cost. The legend at the bottom left opens it too.</li>
+        </ul>
         <h3>Critical path</h3>
         <ul>
-          <li>Tasks with zero <b>slack</b> (float) are critical and shown in red - delaying them delays the whole project.</li>
+          <li>Tasks with zero <b>slack</b> (float) are critical: their bars get a red outline and their links turn red. Delaying them delays the whole project.</li>
           <li>The Slack column shows how many working days a task can slip without moving the finish date.</li>
         </ul>
       </div>

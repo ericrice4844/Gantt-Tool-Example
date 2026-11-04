@@ -21,8 +21,9 @@
   var C_ID = { key: 'id', title: 'ID', width: 40 };
   var C_NAME = { key: 'name', title: 'Task Name', width: 230 };
   var C_PCT = { key: 'pct', title: '% Done', width: 58, num: true };
+  var C_RES = { key: 'resource', title: 'Resource', width: 104, tip: 'Resource group. Type a new name to create a group, or use Resources... to set colors.' };
   var EST_COLUMNS = [
-    C_ID, C_NAME,
+    C_ID, C_NAME, C_RES,
     { key: 'duration', title: 'Duration', width: 72, num: true },
     { key: 'start', title: 'Start', width: 96 },
     { key: 'finish', title: 'Finish', width: 96 },
@@ -34,7 +35,7 @@
     { key: 'slack', title: 'Total Slack', width: 62, num: true }
   ];
   var ACT_COLUMNS = [
-    C_ID, C_NAME,
+    C_ID, C_NAME, C_RES,
     { key: 'start', title: 'Est. Start', width: 92 },
     { key: 'actStart', title: 'Actual Start', width: 100 },
     { key: 'finish', title: 'Est. Finish', width: 92 },
@@ -46,8 +47,8 @@
     { key: 'actCost', title: 'Actual Cost', width: 92, num: true },
     { key: 'costVar', title: 'Cost Var.', width: 88, num: true, tip: 'Actual minus estimated cost, for tasks that have actuals. + is over.' }
   ];
-  var EDIT_EST = ['name', 'duration', 'start', 'finish', 'preds', 'pct', 'headcount', 'hours', 'cost'];
-  var EDIT_ACT = ['name', 'actStart', 'actFinish', 'pct', 'actHours', 'actCost'];
+  var EDIT_EST = ['name', 'resource', 'duration', 'start', 'finish', 'preds', 'pct', 'headcount', 'hours', 'cost'];
+  var EDIT_ACT = ['name', 'resource', 'actStart', 'actFinish', 'pct', 'actHours', 'actCost'];
   var DATE_COLS = ['start', 'finish', 'actStart', 'actFinish'];
   function isActual() { return prefs.mode === 'actual'; }
   function cols() { return isActual() ? ACT_COLUMNS : EST_COLUMNS; }
@@ -78,12 +79,101 @@
   function savePrefs() { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (e) { /* ignore */ } }
   function colWidth(c) { return prefs.colWidths[c.key] || c.width; }
 
+  /* -------------------------------------------------------- resources */
+
+  var DEFAULT_RES_COLOR = '#7cc4f8'; // light blue
+  var PALETTE = [
+    ['Red', '#e5484d'], ['Orange', '#f5a524'], ['Yellow', '#f2d024'], ['Green', '#30a46c'],
+    ['Teal', '#12a594'], ['Blue', '#3e63dd'], ['Light blue', DEFAULT_RES_COLOR], ['Purple', '#8e4ec6'],
+    ['Pink', '#d6409f'], ['Brown', '#a07553'], ['Gray', '#8b8d98']
+  ];
+
+  function validColor(c) { return /^#[0-9a-fA-F]{6}$/.test(String(c || '')) ? String(c).toLowerCase() : DEFAULT_RES_COLOR; }
+
+  /** Mix a #rrggbb color toward black (amt > 0) or white (amt < 0). */
+  function shade(hex, amt) {
+    var n = parseInt(validColor(hex).slice(1), 16);
+    var ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map(function (v) {
+      v = amt > 0 ? v * (1 - amt) : v + (255 - v) * -amt;
+      return ('0' + Math.round(v).toString(16)).slice(-2);
+    });
+    return '#' + ch.join('');
+  }
+
+  function resourceById(id) {
+    var list = project.resources || [];
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+    return null;
+  }
+  function resourceColor(task) { var r = task && resourceById(task.resource); return r ? r.color : DEFAULT_RES_COLOR; }
+  function newResourceId() { return 'res' + Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36); }
+
+  function normalizeResources(list) {
+    var seen = new Set();
+    return (Array.isArray(list) ? list : []).filter(function (r) {
+      if (!r || !r.id || seen.has(String(r.id))) return false;
+      seen.add(String(r.id));
+      return true;
+    }).map(function (r) { return { id: String(r.id), name: String(r.name || 'Resource').trim() || 'Resource', color: validColor(r.color) }; });
+  }
+
+  /** Leaf tasks at or under each of the given task ids (a summary's resource is its subtasks'). */
+  function leafIdsUnder(ids) {
+    var out = [];
+    ids.forEach(function (id) {
+      var i = indexOfId(id);
+      if (i < 0) return;
+      for (var k = i, end = G.subtreeEnd(project.tasks, i); k < end; k++) {
+        var tid = project.tasks[k].id;
+        if (!sched.byId[tid].isSummary && out.indexOf(tid) < 0) out.push(tid);
+      }
+    });
+    return out;
+  }
+
+  /** The single resource shared by every leaf under a task: an id, null (none), or 'mixed'. */
+  function commonResource(id) {
+    var leaves = leafIdsUnder([id]), first;
+    for (var i = 0; i < leaves.length; i++) {
+      var r = taskById(leaves[i]).resource || null;
+      if (i === 0) first = r; else if (r !== first) return 'mixed';
+    }
+    return leaves.length ? first : null;
+  }
+
+  /**
+   * Resolve a typed resource name to an id, creating a new light-blue group
+   * when the name is new. Empty means "no resource". Must run inside mutate().
+   */
+  function resourceIdForName(name) {
+    name = String(name || '').trim();
+    if (!name) return null;
+    var list = project.resources || (project.resources = []);
+    for (var i = 0; i < list.length; i++) if (list[i].name.toLowerCase() === name.toLowerCase()) return list[i].id;
+    var r = { id: newResourceId(), name: name, color: DEFAULT_RES_COLOR };
+    list.push(r);
+    toast('Added resource group "' + name + '" (light blue). Change its color with Resources...');
+    return r.id;
+  }
+
+  /** Assign a resource id (or null) to the given tasks; summaries assign all of their subtasks. Inside mutate(). */
+  function assignResource(ids, resId) {
+    var leaves = leafIdsUnder(ids);
+    leaves.forEach(function (id) { taskById(id).resource = resId; });
+    return leaves.length;
+  }
+
+  function chipHtml(res, extraCls) {
+    var c = res ? res.color : DEFAULT_RES_COLOR;
+    return '<span class="res-chip' + (extraCls ? ' ' + extraCls : '') + '" style="background:' + c + ';border-color:' + shade(c, 0.3) + '"></span>';
+  }
+
   /* ---------------------------------------------------- project model */
 
   function newTask(fields) {
     return Object.assign({
       id: project.nextId++, name: 'New task', level: 0, duration: 1, snet: null,
-      cost: 0, headcount: 0, pct: 0, notes: '', collapsed: false, preds: [],
+      cost: 0, headcount: 0, pct: 0, notes: '', collapsed: false, preds: [], resource: null,
       actualStart: null, actualFinish: null, actualHours: 0, actualCost: 0
     }, fields || {});
   }
@@ -95,6 +185,7 @@
       start: G.formatDate(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())),
       skipWeekends: true, hoursPerDay: 8,
       holidays: { enabled: G.STANDARD_HOLIDAYS.slice(), custom: [] },
+      resources: [],
       nextId: 1, tasks: []
     };
   }
@@ -120,6 +211,8 @@
       enabled: hc.enabled.filter(function (x) { return G.HOLIDAYS.some(function (h) { return h.id === x; }); }),
       custom: hc.custom.map(function (c) { return { date: c.date, name: String(c.name || 'Holiday') }; })
     };
+    p.resources = normalizeResources(obj.resources);
+    var resIds = new Set(p.resources.map(function (r) { return r.id; }));
     var validDate = function (d) { return d && !isNaN(G.parseDate(d)) ? d : null; };
     var seen = new Set(), maxId = 0;
     p.tasks = obj.tasks.map(function (t) {
@@ -132,6 +225,7 @@
         snet: validDate(t.snet),
         cost: +t.cost || 0, headcount: G.taskHeadcount(t, duration, p.hoursPerDay),
         pct: Math.min(100, Math.max(0, +t.pct || 0)),
+        resource: t.resource != null && resIds.has(String(t.resource)) ? String(t.resource) : null,
         actualStart: validDate(t.actualStart), actualFinish: validDate(t.actualFinish),
         actualHours: Math.max(0, +t.actualHours || 0), actualCost: Math.max(0, +t.actualCost || 0),
         notes: String(t.notes || ''), collapsed: !!t.collapsed,
@@ -292,6 +386,12 @@
       b.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
     document.body.classList.toggle('actual-mode', isActual());
+    var as = $('assignResource');
+    as.innerHTML = '<option value="">Assign resource&hellip;</option>' +
+      (project.resources || []).map(function (x) { return '<option value="' + esc(x.id) + '">&#9632; ' + esc(x.name) + '</option>'; }).join('') +
+      '<option value="__none">(none)</option><option value="__manage">Manage groups&hellip;</option>';
+    as.value = '';
+    as.disabled = false;
     var sel = selectedTaskIds();
     setDisabled('undo', !undoStack.length);
     setDisabled('redo', !redoStack.length);
@@ -333,7 +433,7 @@
   function cellEditable(row, col) {
     if (row.project) return col === 'name';
     var r = sched.byId[row.id];
-    if (r.isSummary) return col === 'name' || (col === 'preds' && !isActual());
+    if (r.isSummary) return col === 'name' || col === 'resource' || (col === 'preds' && !isActual());
     return (isActual() ? EDIT_ACT : EDIT_EST).indexOf(col) >= 0;
   }
 
@@ -368,7 +468,7 @@
     if (row.project) {
       if (col === 'id') return '0';
       if (col === 'name') return '<span class="toggle blank"></span><span class="name-text">' + esc(project.name) + '</span>';
-      if (col === 'preds' || col === 'slack') return '';
+      if (col === 'preds' || col === 'slack' || col === 'resource') return '';
       return metricHtml(sched.project, col);
     }
     var t = row.task, r = sched.byId[t.id];
@@ -387,6 +487,12 @@
           doneMark + '<span class="name-text">' + esc(t.name) + '</span>' + extras;
       }
       case 'preds': return esc(G.formatPredecessors(t, idToRow));
+      case 'resource': {
+        var rid = r.isSummary ? commonResource(t.id) : t.resource;
+        if (rid === 'mixed') return '<span class="muted">Mixed</span>';
+        var res = resourceById(rid);
+        return res ? chipHtml(res) + '<span class="name-text">' + esc(res.name) + '</span>' : '';
+      }
       case 'slack': return '<span class="' + (showCrit && r.critical ? 'crit' : '') + '">' + fmtSlack(r.slack) + '</span>';
     }
     return metricHtml(r, col);
@@ -430,6 +536,14 @@
     var input = document.createElement('input');
     input.type = DATE_COLS.indexOf(col) >= 0 ? 'date' : 'text';
     input.spellcheck = false;
+    if (col === 'resource') {
+      var dl = document.createElement('datalist');
+      dl.id = 'resList';
+      dl.innerHTML = (project.resources || []).map(function (x) { return '<option value="' + esc(x.name) + '">'; }).join('');
+      cell.appendChild(dl);
+      input.setAttribute('list', 'resList');
+      input.placeholder = 'Type or pick a group';
+    }
     input.value = initialText != null ? initialText : editValue(row, col);
     cell.appendChild(input);
     var ed = { id: id, col: col, input: input };
@@ -451,6 +565,11 @@
     var t = row.task, r = sched.byId[t.id];
     switch (col) {
       case 'name': return t.name;
+      case 'resource': {
+        var rid = r.isSummary ? commonResource(t.id) : t.resource;
+        var res = rid && rid !== 'mixed' ? resourceById(rid) : null;
+        return res ? res.name : '';
+      }
       case 'duration': return String(r.duration);
       case 'start': return fmtDate(r.startMs);
       case 'finish': return fmtDate(r.finishMs);
@@ -472,7 +591,11 @@
     var ed = editor;
     editor = null;
     var value = ed.input.value;
-    if (ed.input.parentNode) ed.input.parentNode.removeChild(ed.input);
+    if (ed.input.parentNode) {
+      var dlEl = ed.input.parentNode.querySelector('datalist');
+      if (dlEl) dlEl.remove();
+      ed.input.parentNode.removeChild(ed.input);
+    }
     if (commit) commitCell(ed.id, ed.col, value);
     else render();
     $('gridBody').focus({ preventScroll: true });
@@ -488,6 +611,7 @@
       var t = taskById(id), r = sched.byId[id];
       switch (col) {
         case 'name': t.name = value; break;
+        case 'resource': assignResource([id], resourceIdForName(value)); break;
         case 'duration': {
           var d = G.parseDuration(value, project.skipWeekends);
           if (isNaN(d)) throw new Error('Durations look like 5, 5d or 2w (0 = milestone).');
@@ -790,7 +914,7 @@
         h.push('</g>');
         return;
       }
-      h.push('<g class="bar-group' + (isCrit ? ' crit' : '') + selCls + '" data-id="' + row.id + '">');
+      h.push('<g class="bar-group' + (isCrit ? ' crit' : '') + selCls + (row.task.resource ? ' has-res' : '') + '" data-id="' + row.id + '"' + resStyle(row.task) + '>');
       if (g.kind === 'milestone') {
         var c = g.cx, yc = g.yc;
         h.push('<path class="milestone' + (isActual() ? ' plan' : '') + '" d="M' + c + ' ' + (yc - 8) + ' L' + (c + 8) + ' ' + yc + ' L' + c + ' ' + (yc + 8) + ' L' + (c - 8) + ' ' + yc + ' Z"/>');
@@ -840,6 +964,12 @@
     var open = isNaN(o.actFinishMs);
     var f = open ? Math.max(G.todayUTC(), s0) : o.actFinishMs;
     return { x1: X(s0), x2: X(f + DAY), open: open };
+  }
+
+  /** CSS variables that color a task's bar by its resource group (light blue when it has none). */
+  function resStyle(task) {
+    var c = resourceColor(task);
+    return ' style="--res-fill:' + c + ';--res-stroke:' + shade(c, 0.35) + ';--res-progress:' + shade(c, 0.55) + '"';
   }
 
   function selectionRects(width) {
@@ -895,8 +1025,12 @@
     parts.push('<span>Complete <b>' + Math.round(P.pct) + '%</b></span>');
     parts.push('<span class="crit">Critical tasks <b>' + P.criticalCount + '</b></span>');
     parts.push('<span class="hint">' + (isActual()
-      ? 'Actual mode: enter actual dates, hours and cost &middot; grey line = estimate, purple bar = actual'
+      ? 'Actual mode: enter actual dates, hours and cost &middot; grey line = estimate, colored bar = actual'
       : 'Double-click a row or bar for details &middot; drag the dots at bar ends to link tasks &middot; press ? for help') + '</span>');
+    if ((project.resources || []).length) {
+      parts.unshift('<span class="legend" title="Resource groups - click to edit" data-cmd-legend>' +
+        project.resources.map(function (x) { return '<span class="legend-item">' + chipHtml(x) + esc(x.name) + '</span>'; }).join('') + '</span>');
+    }
     $('statusbar').innerHTML = parts.join('');
   }
 
@@ -1115,11 +1249,18 @@
     toast('Project downloaded as ' + slug(project.name) + '.json');
   }
 
+  function csvResource(id) {
+    var rid = sched.byId[id].isSummary ? commonResource(id) : taskById(id).resource;
+    if (rid === 'mixed') return 'Mixed';
+    var res = resourceById(rid);
+    return res ? res.name : '';
+  }
+
   function exportCsv() {
     var q = function (v) { v = String(v == null ? '' : v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
     var d = function (ms) { return isNaN(ms) ? '' : fmtDate(ms); };
     var n2 = function (v) { return round(v, 2); };
-    var lines = [['ID', 'WBS', 'Outline Level', 'Task Name', 'Summary', 'Milestone', 'Duration (working days)', 'Start', 'Finish',
+    var lines = [['ID', 'WBS', 'Outline Level', 'Task Name', 'Resource', 'Summary', 'Milestone', 'Duration (working days)', 'Start', 'Finish',
       'Predecessors', '% Complete', 'Headcount', 'Hours Estimate', 'Cost Estimate', 'Actual Start', 'Actual Finish',
       'Actual Hours', 'Actual Cost', 'Finish Variance (days)', 'Hours Variance', 'Cost Variance',
       'Total Slack (days)', 'Critical', 'Constraint (Start No Earlier Than)', 'Notes']];
@@ -1128,11 +1269,11 @@
         isNaN(o.finishVar) ? '' : o.finishVar, o.hoursVarKnown ? n2(o.hoursVar) : '', o.costVarKnown ? o.costVar.toFixed(2) : ''];
     };
     var P = sched.project;
-    lines.push([0, '0', 0, project.name, 'Yes', 'No', P.duration, fmtDate(P.startMs), fmtDate(P.finishMs), '', Math.round(P.pct)]
+    lines.push([0, '0', 0, project.name, '', 'Yes', 'No', P.duration, fmtDate(P.startMs), fmtDate(P.finishMs), '', Math.round(P.pct)]
       .concat(row(P), ['', '', '', '']));
     project.tasks.forEach(function (t, i) {
       var r = sched.byId[t.id];
-      lines.push([i + 1, r.wbs, t.level + 1, t.name, r.isSummary ? 'Yes' : 'No', r.isMilestone ? 'Yes' : 'No', r.duration,
+      lines.push([i + 1, r.wbs, t.level + 1, t.name, csvResource(t.id), r.isSummary ? 'Yes' : 'No', r.isMilestone ? 'Yes' : 'No', r.duration,
         fmtDate(r.startMs), fmtDate(r.finishMs), G.formatPredecessors(t, idToRow), Math.round(r.pct)]
         .concat(row(r), [r.slack, r.critical ? 'Yes' : 'No', r.isSummary ? '' : (t.snet || ''), t.notes || '']));
     });
@@ -1190,6 +1331,15 @@
     }).join('');
   }
 
+  function resourceOptions(sel) {
+    var out = '<option value=""' + (!sel ? ' selected' : '') + '>(none)</option>';
+    if (sel === 'mixed') out += '<option value="mixed" selected>Mixed (leave as is)</option>';
+    (project.resources || []).forEach(function (x) {
+      out += '<option value="' + esc(x.id) + '"' + (x.id === sel ? ' selected' : '') + '>' + esc(x.name) + '</option>';
+    });
+    return out;
+  }
+
   function openTaskDialog(id) {
     if (id === PROJECT_ROW || id == null) return;
     var t = taskById(id), r = sched.byId[id];
@@ -1204,6 +1354,7 @@
     while (p !== -1) { exclude.add(project.tasks[p].id); p = tree.parent[p]; }
     for (var k = i + 1, end = G.subtreeEnd(project.tasks, i); k < end; k++) exclude.add(project.tasks[k].id);
 
+    var dlgRes = isSum ? commonResource(id) : (t.resource || null);
     var preds = t.preds.map(function (l) { return { id: l.id, type: l.type, lag: l.lag }; });
     var succs = [];
     project.tasks.forEach(function (s) {
@@ -1236,6 +1387,7 @@
       '<label class="f">Start no earlier than<span class="inline"><input type="date" name="snet" value="' + esc(isSum ? '' : t.snet || '') + '"' + (isSum ? ' disabled' : '') + '>' +
       '<button type="button" data-clear-snet' + (isSum ? ' disabled' : '') + '>Clear</button></span></label>' +
       '<label class="f">% Complete<input name="pct" type="number" min="0" max="100" value="' + Math.round(r.pct) + '"' + (isSum ? ' disabled' : '') + '></label>' +
+      '<label class="f">Resource group' + (isSum ? ' (applies to all subtasks)' : '') + '<select name="resource">' + resourceOptions(dlgRes) + '</select></label>' +
       '<label class="f">Outline (WBS)<input value="' + r.wbs + '" disabled></label>' +
       '</div>' +
       '<h3>Estimate</h3>' +
@@ -1355,6 +1507,8 @@
         var tt = taskById(id);
         tt.name = f.name.value;
         tt.notes = f.notes.value;
+        var newRes = f.resource.value;
+        if (newRes !== 'mixed' && newRes !== (dlgRes || '')) assignResource([id], newRes || null);
         if (!isSum) {
           tt.duration = dur;
           tt.snet = f.snet.value || null;
@@ -1423,6 +1577,100 @@
         l.type = type; l.lag = Math.round(+form.elements.lag.value || 0);
       });
       if (ok) dlg.close();
+    };
+    dlg.showModal();
+  }
+
+  function openResourcesDialog() {
+    var dlg = $('resDialog');
+    var list = (project.resources || []).map(function (x) { return { id: x.id, name: x.name, color: x.color }; });
+    var usage = {};
+    project.tasks.forEach(function (t) {
+      var r = sched.byId[t.id];
+      if (r.isSummary) return;
+      var k = t.resource || '';
+      var u = usage[k] || (usage[k] = { n: 0, hours: 0, cost: 0 });
+      u.n++; u.hours += r.hours; u.cost += r.cost;
+    });
+    function usageText(id) {
+      var u = usage[id || ''];
+      return u ? u.n + ' task' + (u.n === 1 ? '' : 's') + ' &middot; ' + fmtNum(u.hours) + ' h &middot; ' + fmtMoney(u.cost) : 'No tasks';
+    }
+    function swatches(n) {
+      return PALETTE.map(function (pc) {
+        return '<button type="button" class="swatch" data-sw="' + n + '" data-color="' + pc[1] + '" title="' + pc[0] + '" style="background:' + pc[1] + '"></button>';
+      }).join('');
+    }
+    function rowsHtml() {
+      if (!list.length) return '<tr><td colspan="4" class="empty">No resource groups yet. Add one below, or type a new name in a task\'s Resource cell.</td></tr>';
+      return list.map(function (x, n) {
+        return '<tr data-n="' + n + '">' +
+          '<td><input type="color" data-f="color" value="' + x.color + '" title="Pick any color"></td>' +
+          '<td><input class="wide" data-f="name" value="' + esc(x.name) + '" placeholder="e.g. Software"><div class="swatches">' + swatches(n) + '</div></td>' +
+          '<td class="muted usage">' + usageText(x.id) + '</td>' +
+          '<td><button type="button" class="danger" data-rm="' + n + '" title="Delete group (its tasks become unassigned)">&#10005;</button></td></tr>';
+      }).join('');
+    }
+    function readRows() {
+      dlg.querySelectorAll('#resRows tr[data-n]').forEach(function (tr) {
+        var x = list[+tr.dataset.n];
+        x.color = validColor(tr.querySelector('[data-f=color]').value);
+        x.name = tr.querySelector('[data-f=name]').value;
+      });
+    }
+    function redraw() { dlg.querySelector('#resRows').innerHTML = rowsHtml(); }
+
+    dlg.innerHTML =
+      '<form method="dialog" novalidate>' +
+      '<h2>Resource groups</h2>' +
+      '<div class="type-desc" style="margin-bottom:10px">Assign a group to tasks in the <b>Resource</b> column, the toolbar\'s Assign list, or Task details. ' +
+      'Bars are drawn in the group\'s color. Tasks without a group are light blue.</div>' +
+      '<table class="links res-table"><thead><tr><th>Color</th><th>Name</th><th>Used by</th><th></th></tr></thead><tbody id="resRows">' + rowsHtml() + '</tbody></table>' +
+      '<button type="button" id="addRes" style="margin-top:8px">+ Add resource group</button>' +
+      '<div class="type-desc">Unassigned: ' + usageText('') + '</div>' +
+      '<div class="err" id="resErr"></div>' +
+      '<div class="dlg-buttons"><button type="button" id="resCancel">Cancel</button><button type="submit" class="primary">OK</button></div>' +
+      '</form>';
+
+    var form = dlg.querySelector('form');
+    dlg.querySelector('#addRes').onclick = function () {
+      readRows();
+      list.push({ id: newResourceId(), name: '', color: DEFAULT_RES_COLOR });
+      redraw();
+      var inputs = dlg.querySelectorAll('#resRows [data-f=name]');
+      if (inputs.length) inputs[inputs.length - 1].focus();
+    };
+    dlg.querySelector('#resRows').onclick = function (e) {
+      var sw = e.target.closest('[data-sw]');
+      if (sw) {
+        var tr = sw.closest('tr');
+        tr.querySelector('[data-f=color]').value = sw.dataset.color;
+        return;
+      }
+      var b = e.target.closest('[data-rm]');
+      if (!b) return;
+      readRows();
+      list.splice(+b.dataset.rm, 1);
+      redraw();
+    };
+    dlg.querySelector('#resCancel').onclick = function () { dlg.close(); };
+    form.onsubmit = function (e) {
+      e.preventDefault();
+      readRows();
+      var names = new Set(), err = '';
+      list.forEach(function (x) {
+        x.name = x.name.trim();
+        if (!x.name) err = 'Every resource group needs a name.';
+        else if (names.has(x.name.toLowerCase())) err = 'Two groups are both called "' + x.name + '".';
+        names.add(x.name.toLowerCase());
+      });
+      if (err) { dlg.querySelector('#resErr').textContent = err; return; }
+      var keep = new Set(list.map(function (x) { return x.id; }));
+      mutate(function () {
+        project.resources = list.map(function (x) { return { id: x.id, name: x.name, color: validColor(x.color) }; });
+        project.tasks.forEach(function (t) { if (t.resource && !keep.has(t.resource)) t.resource = null; });
+      });
+      dlg.close();
     };
     dlg.showModal();
   }
@@ -1563,9 +1811,17 @@
     var t = taskById(id), r = sched.byId[id];
     return '<b>' + idToRow(id) + '. ' + esc(t.name) + '</b>' + (r.isSummary ? ' (summary)' : '') +
       '<br>' + fmtLongDate(r.startMs) + (r.isMilestone ? '' : ' → ' + fmtLongDate(r.finishMs)) +
+      resourceTip(id) +
       '<br>' + G.formatDuration(r.duration) + ' · ' + Math.round(r.pct) + '% done' +
       '<br>' + (r.isSummary ? '' : fmtHead(r.headcount) + ' people · ') + fmtNum(r.hours) + ' h · ' + fmtMoney(r.cost) +
       '<br>Slack ' + fmtSlack(r.slack) + (r.critical ? ' · <span style="color:#ff8a8d">critical</span>' : '') + actualTip(r);
+  }
+
+  function resourceTip(id) {
+    var rid = sched.byId[id].isSummary ? commonResource(id) : taskById(id).resource;
+    if (rid === 'mixed') return '<br>Resources: mixed';
+    var res = resourceById(rid);
+    return res ? '<br>' + chipHtml(res) + ' ' + esc(res.name) : '';
   }
 
   function actualTip(o) {
@@ -1782,6 +2038,7 @@
       case 'redo': redo(); break;
       case 'help': $('helpDialog').showModal(); break;
       case 'calendar': openCalendarDialog(); break;
+      case 'resources': openResourcesDialog(); break;
     }
   }
 
@@ -1789,6 +2046,18 @@
     document.querySelectorAll('[data-cmd]').forEach(function (b) {
       b.addEventListener('click', function () { runCommand(b.dataset.cmd); });
     });
+    $('assignResource').addEventListener('change', function (e) {
+      var v = e.target.value;
+      e.target.value = '';
+      if (v === '__manage') { openResourcesDialog(); return; }
+      var ids = selectedTaskIds();
+      if (!ids.length) { toast('Select one or more tasks first.'); return; }
+      var res = v === '__none' ? null : resourceById(v);
+      var n = 0;
+      mutate(function () { n = assignResource(ids, res ? res.id : null); });
+      toast(res ? 'Assigned ' + n + ' task' + (n === 1 ? '' : 's') + ' to ' + res.name + '.' : 'Removed the resource group from ' + n + ' task' + (n === 1 ? '' : 's') + '.');
+    });
+    $('statusbar').addEventListener('click', function (e) { if (e.target.closest('[data-cmd-legend]')) openResourcesDialog(); });
     document.querySelectorAll('[data-mode]').forEach(function (b) {
       b.addEventListener('click', function () { setMode(b.dataset.mode); });
     });
