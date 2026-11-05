@@ -315,3 +315,53 @@ test('actuals roll up with variances', () => {
   assert.equal(r2.byId[1].hoursVar, 0); assert.equal(r2.byId[1].hoursVarKnown, false);
   assert.equal(r2.project.costVar, 0);
 });
+
+/* ---------------------------------------------------------- tracing */
+
+test('trace predecessors and successors, through summaries', () => {
+  const p = proj([
+    { duration: 2 },                                 // 1
+    { duration: 3, preds: [L(1)] },                  // 2
+    { level: 0, preds: [L(2)] },                     // 3 summary, after 2
+    { level: 1, duration: 2 },                       // 4
+    { level: 1, duration: 4, preds: [L(4)] },        // 5
+    { level: 0, duration: 1, preds: [L(3)] },        // 6 after the whole summary
+    { level: 0, duration: 1 }                        // 7 unrelated
+  ]);
+  const r = G.schedule(p);
+  const ids = a => a.map(x => x.id).sort((x, y) => x - y);
+  // 5's predecessors: 4 directly, and 2 and 1 via its parent summary.
+  assert.deepEqual(ids(G.traceDependencies(r, 5, 'up')), [1, 2, 4]);
+  assert.deepEqual(ids(G.traceDependencies(r, 5, 'up', true)), [2, 4]);
+  // 1's successors reach the summary, everything inside it, and 6.
+  assert.deepEqual(ids(G.traceDependencies(r, 1, 'down')), [2, 3, 4, 5, 6]);
+  assert.deepEqual(ids(G.traceDependencies(r, 1, 'down', true)), [2]);
+  // 4 feeds 6 through its parent summary.
+  assert.deepEqual(ids(G.traceDependencies(r, 4, 'down')), [5, 6]);
+  assert.deepEqual(ids(G.traceDependencies(r, 7, 'up')), []);
+});
+
+test('driving predecessors follow only the links that set the start', () => {
+  const p = proj([
+    { duration: 5 },                                 // 1 long
+    { duration: 1 },                                 // 2 short
+    { duration: 2, preds: [L(1), L(2)] },            // 3 driven by 1 only
+    { duration: 1, snet: '2025-03-03', preds: [L(3)] }, // 4 driven by its date, not by 3
+    { level: 0, preds: [L(3)] },                     // 5 summary after 3
+    { level: 1, duration: 1 },                       // 6 starts with the summary
+    { duration: 1, preds: [L(5)] }                   // 7 after the summary (finishes with 6)
+  ]);
+  const r = G.schedule(p);
+  const ids = a => a.map(x => x.id).sort((x, y) => x - y);
+  assert.deepEqual(ids(G.drivingPredecessors(r, 3)), [1]);
+  assert.deepEqual(ids(G.drivingPredecessors(r, 4)), []);
+  assert.deepEqual(ids(G.drivingPredecessors(r, 6)), [1, 3]);
+  assert.deepEqual(ids(G.drivingPredecessors(r, 7)), [1, 3, 5, 6]);
+});
+
+test('critical tasks come back in date order', () => {
+  const r = G.schedule(proj([
+    { duration: 3 }, { duration: 1 }, { duration: 2, preds: [L(1)] }, { duration: 1, preds: [L(3), L(2)] }
+  ]));
+  assert.deepEqual(G.criticalTasks(r), [1, 3, 4]);
+});

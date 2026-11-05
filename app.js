@@ -1420,6 +1420,7 @@
       '<table class="links"><thead><tr><th>Task</th><th>Type</th><th>Lag</th><th></th></tr></thead><tbody id="succRows">' + succRows() + '</tbody></table>' +
       '<div class="err" id="taskErr"></div>' +
       '<div class="dlg-buttons"><button type="button" class="danger left" id="dlgDelete">Delete task</button>' +
+      '<button type="button" id="dlgTrace" title="Show this task\'s predecessors and successors in a Gantt pop-out">Trace&hellip;</button>' +
       '<button type="button" id="dlgCancel">Cancel</button><button type="submit" class="primary" value="ok">OK</button></div>' +
       '</form>';
 
@@ -1478,6 +1479,7 @@
     var clr = dlg.querySelector('[data-clear-snet]');
     clr.onclick = function () { form.elements.snet.value = ''; };
     dlg.querySelector('#dlgCancel').onclick = function () { dlg.close(); };
+    dlg.querySelector('#dlgTrace').onclick = function () { dlg.close(); openTraceDialog(id, 'both'); };
     dlg.querySelector('#dlgDelete').onclick = function () {
       dlg.close();
       selection.clear(); selection.add(id);
@@ -1673,6 +1675,275 @@
       dlg.close();
     };
     dlg.showModal();
+  }
+
+  /* ------------------------------------------------------------ trace */
+
+  var TRACE_MODES = [
+    ['critical', 'Critical path (whole project)'],
+    ['driving', 'Driving path - what sets this task\'s start'],
+    ['up', 'Predecessors of a task'],
+    ['down', 'Successors of a task'],
+    ['both', 'Predecessors and successors of a task']
+  ];
+  var trace = { mode: 'critical', focus: null, direct: false, steps: [], cur: 0, info: {} };
+
+  function openTraceDialog(focusId, mode) {
+    var sel = selectedTaskIds();
+    trace.focus = focusId != null ? focusId : (sel[0] != null ? sel[0] : (project.tasks[0] && project.tasks[0].id));
+    trace.mode = mode || (focusId != null || sel.length ? 'both' : 'critical');
+    var dlg = $('traceDialog');
+    dlg.innerHTML =
+      '<div class="trace-top">' +
+      '<h2>Trace</h2>' +
+      '<select id="trMode" title="What to show">' + TRACE_MODES.map(function (m) { return '<option value="' + m[0] + '">' + m[1] + '</option>'; }).join('') + '</select>' +
+      '<label class="trace-task">Task <select id="trTask"></select></label>' +
+      '<label class="check" id="trDirectWrap" title="Only tasks linked straight to this one"><input type="checkbox" id="trDirect"> Direct links only</label>' +
+      '<span class="muted" id="trSummary"></span>' +
+      '<button type="button" class="trace-close" id="trClose" title="Close (Esc)">&#10005;</button>' +
+      '</div>' +
+      '<div class="trace-walk">' +
+      '<button type="button" id="trPrev" title="Previous task (Left arrow)">&#9664; Prev</button>' +
+      '<span id="trStep" class="trace-step"></span>' +
+      '<button type="button" id="trNext" title="Next task (Right arrow)">Next &#9654;</button>' +
+      '<div id="trDetail" class="trace-detail"></div>' +
+      '<button type="button" id="trRefocus" title="Trace predecessors and successors of the highlighted task (or double-click a row)">Trace from here</button>' +
+      '<button type="button" id="trShow" title="Close and select this task in the main chart">Show in main chart</button>' +
+      '</div>' +
+      '<div class="trace-scroll" id="trScroll"></div>';
+    $('trTask').innerHTML = project.tasks.map(function (t, i) {
+      return '<option value="' + t.id + '">' + (i + 1) + ' - ' + '  '.repeat(t.level) + esc(t.name) + '</option>';
+    }).join('');
+    $('trMode').onchange = function (e) { trace.mode = e.target.value; computeTrace(true); };
+    $('trTask').onchange = function (e) { trace.focus = Number(e.target.value); computeTrace(true); };
+    $('trDirect').onchange = function (e) { trace.direct = e.target.checked; computeTrace(true); };
+    $('trPrev').onclick = function () { stepTrace(-1); };
+    $('trNext').onclick = function () { stepTrace(1); };
+    $('trClose').onclick = function () { dlg.close(); };
+    $('trRefocus').onclick = function () { var id = trace.steps[trace.cur]; if (id != null) { trace.focus = id; trace.mode = trace.mode === 'critical' ? 'both' : trace.mode; computeTrace(true); } };
+    $('trShow').onclick = function () { var id = trace.steps[trace.cur]; dlg.close(); if (id != null) revealTask(id); };
+    $('trScroll').onclick = function (e) {
+      var el = e.target.closest('[data-tr]');
+      if (el) { trace.cur = +el.dataset.tr; updateTraceCursor(); }
+    };
+    $('trScroll').ondblclick = function (e) {
+      var el = e.target.closest('[data-tr]');
+      if (!el) return;
+      trace.focus = trace.steps[+el.dataset.tr];
+      if (trace.mode === 'critical') trace.mode = 'both';
+      computeTrace(true);
+    };
+    dlg.onkeydown = function (e) {
+      if (e.target.matches('select, input')) return;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); stepTrace(1); }
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); stepTrace(-1); }
+      else if (e.key === 'Enter') { e.preventDefault(); $('trRefocus').click(); }
+    };
+    dlg.showModal();
+    computeTrace(true);
+    $('trNext').focus();
+  }
+
+  function computeTrace(resetCursor) {
+    var m = trace.mode, id = trace.focus, info = {}, list;
+    var needsTask = m !== 'critical';
+    $('trMode').value = m;
+    $('trTask').value = String(id);
+    $('trTask').disabled = !needsTask;
+    $('trDirectWrap').style.visibility = (m === 'up' || m === 'down' || m === 'both') ? '' : 'hidden';
+    $('trDirect').checked = trace.direct;
+    if (m === 'critical') {
+      list = G.criticalTasks(sched);
+      list.forEach(function (x) { info[x] = { links: sched.links.filter(function (l) { return l.succId === x && l.critical; }), dir: 'crit' }; });
+    } else {
+      var add = function (arr, dir) { arr.forEach(function (x) { if (!info[x.id]) info[x.id] = { links: x.links, dir: dir, depth: x.depth }; }); };
+      if (m === 'driving') add(G.drivingPredecessors(sched, id), 'up');
+      if (m === 'up' || m === 'both') add(G.traceDependencies(sched, id, 'up', trace.direct), 'up');
+      if (m === 'down' || m === 'both') add(G.traceDependencies(sched, id, 'down', trace.direct), 'down');
+      info[id] = { links: [], dir: 'focus' };
+      list = Object.keys(info).map(Number);
+    }
+    list.sort(function (a, b) {
+      var ra = sched.byId[a], rb = sched.byId[b];
+      return ra.startMs - rb.startMs || ra.index - rb.index;
+    });
+    trace.steps = list;
+    trace.info = info;
+    if (resetCursor) {
+      var fi = needsTask ? list.indexOf(id) : 0;
+      trace.cur = fi >= 0 ? fi : 0;
+    }
+    renderTrace();
+  }
+
+  function stepTrace(d) {
+    if (!trace.steps.length) return;
+    trace.cur = Math.min(trace.steps.length - 1, Math.max(0, trace.cur + d));
+    updateTraceCursor();
+    var rowEl = $('trScroll').querySelector('.trace-row[data-tr="' + trace.cur + '"]');
+    if (rowEl) rowEl.scrollIntoView({ block: 'nearest' });
+  }
+
+  function revealTask(id) {
+    var tree = G.buildTree(project.tasks);
+    var p = tree.parent[indexOfId(id)];
+    while (p !== -1) { project.tasks[p].collapsed = false; p = tree.parent[p]; }
+    buildRows();
+    selection.clear(); selection.add(id); anchorId = id; active.id = id;
+    render(); persist();
+    scrollToTask();
+  }
+
+  function linkLabel(l) {
+    return idToRow(l.predId) + ' → ' + idToRow(l.succId) + ' ' + l.type + (l.lag ? G.formatLag(l.lag) : '');
+  }
+
+  function relationsHtml(id) {
+    var anc = [id], p = sched.byId[id].parentId;
+    while (p != null) { anc.push(p); p = sched.byId[p].parentId; }
+    var inSet = new Set(trace.steps);
+    function item(otherId, l, via) {
+      var t = taskById(otherId);
+      return '<span class="tr-rel' + (inSet.has(otherId) ? ' in' : '') + '">' + idToRow(otherId) + ' ' + esc(t.name) +
+        ' <span class="muted">(' + l.type + (l.lag ? G.formatLag(l.lag) : '') + (via ? ', via ' + esc(taskById(via).name) : '') + ')</span>' +
+        (l.driving ? ' <b class="tr-driving" title="This link sets the start date">driving</b>' : '') + '</span>';
+    }
+    var preds = [], succs = [];
+    sched.links.forEach(function (l) {
+      var si = anc.indexOf(l.succId), pi = anc.indexOf(l.predId);
+      if (si >= 0) preds.push(item(l.predId, l, si > 0 ? l.succId : null));
+      if (pi >= 0) succs.push(item(l.succId, l, pi > 0 ? l.predId : null));
+    });
+    return '<div><b>Predecessors:</b> ' + (preds.join(' &middot; ') || '<span class="muted">none</span>') + '</div>' +
+      '<div><b>Successors:</b> ' + (succs.join(' &middot; ') || '<span class="muted">none</span>') + '</div>';
+  }
+
+  /** Move the highlighted step without rebuilding the table (keeps double-click working). */
+  function updateTraceCursor() {
+    var steps = trace.steps, n = steps.length, curId = steps[trace.cur];
+    $('trPrev').disabled = trace.cur <= 0;
+    $('trNext').disabled = trace.cur >= n - 1;
+    $('trRefocus').disabled = $('trShow').disabled = curId == null;
+    $('trStep').textContent = n ? 'Step ' + (trace.cur + 1) + ' of ' + n : 'No tasks';
+    if (curId == null) {
+      $('trDetail').innerHTML = trace.mode === 'critical' ? 'No critical tasks.' : 'This task has no links in that direction.';
+    } else {
+      var r = sched.byId[curId], t = taskById(curId), res = resourceById(t.resource);
+      $('trDetail').innerHTML = '<div class="tr-title"><b>' + idToRow(curId) + '. ' + esc(t.name) + '</b>' +
+        (res ? ' ' + chipHtml(res) + esc(res.name) : '') + ' <span class="muted">' + fmtLongDate(r.startMs) +
+        (r.isMilestone ? '' : ' \u2192 ' + fmtLongDate(r.finishMs)) + ' \u00b7 ' + G.formatDuration(r.duration) +
+        ' \u00b7 slack ' + fmtSlack(r.slack) + '</span>' + (r.critical ? ' <b class="tr-crit">critical</b>' : '') + '</div>' + relationsHtml(curId);
+    }
+    var scroll = $('trScroll');
+    scroll.querySelectorAll('.trace-row').forEach(function (el) { el.classList.toggle('current', +el.dataset.tr === trace.cur); });
+    var cr = scroll.querySelector('#trCurRect');
+    if (cr) cr.setAttribute('y', trace.cur * ROW_H);
+  }
+
+  function renderTrace() {
+    var steps = trace.steps, n = steps.length;
+
+    // Summary line
+    var lo = Infinity, hi = -Infinity, crit = 0;
+    steps.forEach(function (x) { var r = sched.byId[x]; lo = Math.min(lo, r.startMs); hi = Math.max(hi, r.finishMs); if (!r.isSummary && r.critical) crit++; });
+    var focusName = taskById(trace.focus) ? idToRow(trace.focus) + '. ' + taskById(trace.focus).name : '';
+    var what = {
+      critical: n + ' critical task' + (n === 1 ? '' : 's'),
+      driving: (n - 1) + ' task' + (n === 2 ? '' : 's') + ' driving "' + focusName + '"',
+      up: (n - 1) + ' predecessor' + (n === 2 ? '' : 's') + ' of "' + focusName + '"',
+      down: (n - 1) + ' successor' + (n === 2 ? '' : 's') + ' of "' + focusName + '"',
+      both: (n - 1) + ' linked task' + (n === 2 ? '' : 's') + ' around "' + focusName + '"'
+    }[trace.mode];
+    $('trSummary').textContent = what + (n ? ' \u00b7 ' + fmtLongDate(lo) + ' \u2192 ' + fmtLongDate(hi) + ' \u00b7 ' + crit + ' critical' : '');
+
+    // Table + mini Gantt
+    var LCOLS = [['ID', 40], ['Task', 210], ['Start', 84], ['Finish', 84], ['Slack', 48], ['Linked by', 120]];
+    var leftW = LCOLS.reduce(function (a, c) { return a + c[1]; }, 0);
+    var scroll = $('trScroll');
+    if (!n) { scroll.innerHTML = '<div class="empty" style="padding:20px">Nothing to show.</div>'; updateTraceCursor(); return; }
+    var startMs = lo - 3 * DAY, endMs = hi + 6 * DAY;
+    var spanDays = Math.max(7, (endMs - startMs) / DAY);
+    var avail = Math.max(300, (scroll.clientWidth || 900) - leftW - 24);
+    var px = Math.min(30, Math.max(2, avail / spanDays));
+    var bottom = px >= 18 ? 'day' : px >= 5 ? 'week' : 'month', top = { day: 'week', week: 'month', month: 'year' }[bottom];
+    startMs = unitStart(startMs, bottom);
+    var xm = function (ms) { return Math.round((ms - startMs) / DAY * px); };
+    var width = Math.max(avail, xm(endMs) + 200), height = n * ROW_H; // room for labels after the last bar
+
+    var head = '<svg width="' + width + '" height="46">';
+    [['top', top, 0], ['bottom', bottom, 23]].forEach(function (tier) {
+      for (var u = unitStart(startMs, tier[1]); u < startMs + width / px * DAY; u = unitNext(u, tier[1])) {
+        var x1 = Math.max(0, xm(u)), x2 = xm(unitNext(u, tier[1]));
+        if (x2 <= 0) continue;
+        head += '<line class="vline" x1="' + x1 + '" x2="' + x1 + '" y1="' + tier[2] + '" y2="' + (tier[2] + 23) + '"/>';
+        var label = unitLabel(u, tier[1], tier[0], x2 - x1);
+        if (x2 - x1 > label.length * 6.6 + 8) head += '<text class="tick ' + tier[0] + '" x="' + (x1 + 4) + '" y="' + (tier[2] + 16) + '">' + esc(label) + '</text>';
+      }
+    });
+    head += '<line class="hline" x1="0" x2="' + width + '" y1="23" y2="23"/></svg>';
+
+    var body = ['<svg width="' + width + '" height="' + height + '">',
+      '<defs><marker id="trArrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L8 4 L0 8 z"/></marker>' +
+      '<marker id="trArrowCrit" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L8 4 L0 8 z"/></marker></defs>'];
+    var cal = sched.calendar, dayW = Math.max(2, Math.ceil(px));
+    for (var ms = startMs; ms < startMs + width / px * DAY; ms += DAY) {
+      if (cal.holidayName(ms)) body.push('<rect class="holiday" x="' + xm(ms) + '" y="0" width="' + dayW + '" height="' + height + '"><title>' + esc(cal.holidayName(ms)) + '</title></rect>');
+      else if (px >= 6 && project.skipWeekends && G.isWeekend(ms)) body.push('<rect class="weekend" x="' + xm(ms) + '" y="0" width="' + dayW + '" height="' + height + '"/>');
+    }
+    var geo = {};
+    steps.forEach(function (x, i) {
+      var r = sched.byId[x], y0 = i * ROW_H;
+      if (x === trace.focus && trace.mode !== 'critical') body.push('<rect class="tr-focus" x="0" y="' + y0 + '" width="' + width + '" height="' + ROW_H + '"/>');
+      body.push('<line class="hline" x1="0" x2="' + width + '" y1="' + (y0 + ROW_H - 0.5) + '" y2="' + (y0 + ROW_H - 0.5) + '"/>');
+      if (r.isSummary) geo[x] = { x1: xm(r.startMs), x2: xm(r.finishMs + (r.duration > 0 ? DAY : 0)), y0: y0, yc: y0 + 12, kind: 'summary' };
+      else if (r.isMilestone) { var cx = xm(r.startMs); geo[x] = { x1: cx - 7, x2: cx + 7, cx: cx, y0: y0, yc: y0 + ROW_H / 2, kind: 'milestone' }; }
+      else geo[x] = { x1: xm(r.startMs), x2: xm(r.finishMs + DAY), y0: y0, yc: y0 + ROW_H / 2, kind: 'bar' };
+    });
+    body.push('<rect id="trCurRect" class="tr-current" x="0" y="' + trace.cur * ROW_H + '" width="' + width + '" height="' + ROW_H + '"/>');
+    var today = G.todayUTC();
+    if (today >= startMs) body.push('<line class="today" x1="' + xm(today) + '" x2="' + xm(today) + '" y1="0" y2="' + height + '"/>');
+    var showCrit = prefs.showCritical || trace.mode === 'critical';
+    sched.links.forEach(function (l) {
+      var pg = geo[l.predId], sg = geo[l.succId];
+      if (!pg || !sg) return;
+      var c = showCrit && l.critical;
+      body.push('<path class="link' + (c ? ' crit' : '') + (l.driving && trace.mode === 'driving' ? ' tr-drive' : '') + '" d="' + linkPath(pg, sg, l.type) + '" marker-end="url(#' + (c ? 'trArrowCrit' : 'trArrow') + ')"/>');
+    });
+    steps.forEach(function (x, i) {
+      var r = sched.byId[x], t = taskById(x), g = geo[x];
+      var crit = showCrit && r.critical;
+      var cls = 'bar-group' + (crit ? ' crit' : '') + (r.pct >= 100 ? ' done' : '') + (t.resource ? ' has-res' : '');
+      body.push('<g class="' + cls + (r.isSummary ? ' summary-group' : '') + '" data-tr="' + i + '"' + (r.isSummary ? '' : resStyle(t)) + '>');
+      if (g.kind === 'summary') {
+        var y = g.y0 + 9, x2 = Math.max(g.x2, g.x1 + 2);
+        body.push('<path class="summary-bar" d="M' + g.x1 + ' ' + y + ' H' + x2 + ' V' + (y + 11) + ' L' + (x2 - 5) + ' ' + (y + 6) + ' H' + (g.x1 + 5) + ' L' + g.x1 + ' ' + (y + 11) + ' Z"/>');
+      } else if (g.kind === 'milestone') {
+        body.push('<path class="milestone" d="M' + g.cx + ' ' + (g.yc - 8) + ' L' + (g.cx + 8) + ' ' + g.yc + ' L' + g.cx + ' ' + (g.yc + 8) + ' L' + (g.cx - 8) + ' ' + g.yc + ' Z"/>');
+      } else {
+        var bw = Math.max(3, g.x2 - g.x1);
+        body.push('<rect class="bar" x="' + g.x1 + '" y="' + (g.y0 + 8) + '" width="' + bw + '" height="' + (ROW_H - 16) + '" rx="3"/>');
+        if (r.pct > 0) body.push('<rect class="bar-progress" x="' + g.x1 + '" y="' + (g.yc - 2) + '" width="' + (bw * r.pct / 100) + '" height="4" rx="1"/>');
+      }
+      body.push('<text class="bar-label" x="' + (Math.max(g.x2, g.x1) + 10) + '" y="' + (g.y0 + 19) + '">' + esc(t.name) + '</text></g>');
+    });
+    body.push('</svg>');
+
+    var left = steps.map(function (x, i) {
+      var r = sched.byId[x], t = taskById(x), inf = trace.info[x] || {};
+      var via = (inf.links || []).slice(0, 2).map(linkLabel).join(', ') + ((inf.links || []).length > 2 ? ' +' + (inf.links.length - 2) : '');
+      if (inf.dir === 'focus') via = '<b>selected task</b>';
+      var cls = 'trace-row' + (i === trace.cur ? ' current' : '') + (x === trace.focus && trace.mode !== 'critical' ? ' focus' : '') + (r.isSummary ? ' summary' : '');
+      var vals = [idToRow(x), (r.isSummary ? '&#9662; ' : '') + esc(t.name), fmtDate(r.startMs), fmtDate(r.finishMs),
+        '<span class="' + (r.critical ? 'crit' : '') + '">' + fmtSlack(r.slack) + '</span>', via];
+      return '<div class="' + cls + '" data-tr="' + i + '" title="Click to step here; double-click to trace from this task">' +
+        vals.map(function (v, k) { return '<div class="tc" style="width:' + LCOLS[k][1] + 'px">' + v + '</div>'; }).join('') + '</div>';
+    }).join('');
+
+    scroll.innerHTML =
+      '<div class="trace-inner" style="width:' + (leftW + width) + 'px">' +
+      '<div class="trace-head"><div class="trace-left">' + LCOLS.map(function (c) { return '<div class="tc" style="width:' + c[1] + 'px">' + c[0] + '</div>'; }).join('') + '</div>' + head + '</div>' +
+      '<div class="trace-body"><div class="trace-left">' + left + '</div>' + body.join('') + '</div></div>';
+    updateTraceCursor();
   }
 
   function openCalendarDialog() {
@@ -2039,6 +2310,8 @@
       case 'help': $('helpDialog').showModal(); break;
       case 'calendar': openCalendarDialog(); break;
       case 'resources': openResourcesDialog(); break;
+      case 'trace': openTraceDialog(); break;
+      case 'traceCritical': openTraceDialog(null, 'critical'); break;
     }
   }
 
@@ -2246,5 +2519,5 @@
     selection.add(first); anchorId = first; active.id = first;
     render();
   }
-  window.EasyGantt = { get project() { return project; }, get schedule() { return sched; }, runCommand: runCommand, setMode: setMode };
+  window.EasyGantt = { get project() { return project; }, get schedule() { return sched; }, runCommand: runCommand, setMode: setMode, openTrace: openTraceDialog };
 })();

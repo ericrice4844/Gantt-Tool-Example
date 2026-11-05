@@ -56,6 +56,8 @@
     </select>
     <button data-cmd="link" title="Link the selected tasks in order (Ctrl+L). Select 2+ rows with Ctrl/Shift-click.">Link</button>
     <button data-cmd="unlink" title="Remove links between the selected tasks, or all links of a single task">Unlink</button>
+    <button data-cmd="trace" title="Pop-out Gantt of the selected task's predecessors and successors">Trace&hellip;</button>
+    <button data-cmd="traceCritical" title="Walk the critical path step by step in a pop-out Gantt">Walk critical path</button>
   </div>
 
   <div class="group" aria-label="View">
@@ -103,6 +105,7 @@
 <dialog id="linkDialog" class="dlg"></dialog>
 <dialog id="calDialog" class="dlg"></dialog>
 <dialog id="resDialog" class="dlg"></dialog>
+<dialog id="traceDialog" class="dlg trace"></dialog>
 
 <dialog id="helpDialog" class="dlg help">
   <form method="dialog">
@@ -143,6 +146,13 @@
           <li>Give each task a <b>resource group</b> (e.g. Sim, Software, GNC, Hardware) and its bar is drawn in that group's color. Tasks without a group are light blue.</li>
           <li>Type a group name in the <b>Resource</b> column (a new name creates the group), pick one in <b>Assign resource</b> for all selected rows, or use Task details. Assigning a summary assigns all of its subtasks.</li>
           <li><b>Resources&hellip;</b> sets each group's name and color and shows its tasks, hours and cost. The legend at the bottom left opens it too.</li>
+        </ul>
+        <h3>Trace and walk the critical path</h3>
+        <ul>
+          <li><b>Walk critical path</b> opens a pop-out Gantt of only the critical tasks. Step through them with <b>Prev</b>/<b>Next</b> (or the arrow keys).</li>
+          <li><b>Trace&hellip;</b> (or the button in Task details) shows just the selected task's <b>predecessors</b>, <b>successors</b>, both, or its <b>driving path</b>: the chain of links that actually sets its start date.</li>
+          <li>Links on a summary count for everything inside it. Tick <b>Direct links only</b> to see one step either way.</li>
+          <li>Double-click a row (or press <b>Trace from here</b>) to trace from that task instead. <b>Show in main chart</b> selects it in the main view.</li>
         </ul>
         <h3>Critical path</h3>
         <ul>

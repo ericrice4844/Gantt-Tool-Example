@@ -538,6 +538,7 @@
         var vo = n + i;
         r.es = ES[vo]; r.ef = EF[vo];
         r.ls = LS[i]; r.lf = LF[i];
+        r.inConstraint = CON[i]; // earliest start that links into this summary allow its subtasks
         g = rollup(tree.children[i]);
         r.slack = g.slack;
         r.cost = g.cost; r.hours = g.hours; r.actHours = g.actHours; r.actCost = g.actCost;
@@ -627,6 +628,107 @@
     if (t.headcount != null && t.headcount !== '') return Math.max(0, +t.headcount || 0);
     var h = +t.hours || 0;
     return duration > 0 && h > 0 ? h / (duration * hpd) : 0;
+  }
+
+  /* ------------------------------------------------------- tracing */
+
+  function ancestorsOf(sched, id) {
+    var out = [], p = sched.byId[id] && sched.byId[id].parentId;
+    while (p != null) { out.push(p); p = sched.byId[p].parentId; }
+    return out;
+  }
+  function leavesUnder(sched, id) {
+    var r = sched.byId[id];
+    if (!r.isSummary) return [id];
+    var out = [];
+    r.childIds.forEach(function (c) { out = out.concat(leavesUnder(sched, c)); });
+    return out;
+  }
+
+  /**
+   * Tasks upstream (direction 'up' = predecessors) or downstream ('down' =
+   * successors) of a task, following links transitively. Links on a summary
+   * apply to everything inside it: a link into a task's parent counts as a
+   * link into the task, and linking to a summary reaches all of its subtasks.
+   * directOnly stops after the first step.
+   * Returns [{ id, depth, links: [link...] }] (the task itself is not included).
+   */
+  function traceDependencies(sched, id, direction, directOnly) {
+    var up = direction === 'up';
+    var byPred = {}, bySucc = {};
+    sched.links.forEach(function (l) {
+      (byPred[l.predId] = byPred[l.predId] || []).push(l);
+      (bySucc[l.succId] = bySucc[l.succId] || []).push(l);
+    });
+    var found = new Map(), queue = [[id, 0]];
+    var exclude = new Set([id].concat(ancestorsOf(sched, id)));
+    function add(x, depth, l) {
+      if (exclude.has(x)) return;
+      var f = found.get(x);
+      if (f) { if (f.links.indexOf(l) < 0) f.links.push(l); return; }
+      found.set(x, { id: x, depth: depth, links: [l] });
+      queue.push([x, depth]);
+    }
+    while (queue.length) {
+      var item = queue.shift(), cur = item[0], d = item[1];
+      if (directOnly && d >= 1) continue;
+      [cur].concat(ancestorsOf(sched, cur)).forEach(function (t) {
+        ((up ? bySucc : byPred)[t] || []).forEach(function (l) {
+          var other = up ? l.predId : l.succId;
+          add(other, d + 1, l);
+          if (sched.byId[other].isSummary) leavesUnder(sched, other).forEach(function (x) { add(x, d + 1, l); });
+        });
+      });
+    }
+    return Array.from(found.values());
+  }
+
+  /**
+   * Driving predecessors: the chain of links that actually sets a task's
+   * start (like "Task Path" in Microsoft Project). Follows only links whose
+   * requirement equals the successor's start, through summaries, back to
+   * tasks that are driven by a date constraint or the project start.
+   * Returns [{ id, depth, links }] (the task itself is not included).
+   */
+  function drivingPredecessors(sched, id) {
+    var bySucc = {};
+    sched.links.forEach(function (l) { if (l.driving) (bySucc[l.succId] = bySucc[l.succId] || []).push(l); });
+    var found = new Map(), queue = [[id, 0]];
+    function add(x, depth, l) {
+      var f = found.get(x);
+      if (f) { if (f.links.indexOf(l) < 0) f.links.push(l); return; }
+      found.set(x, { id: x, depth: depth, links: [l] });
+      queue.push([x, depth]);
+    }
+    while (queue.length) {
+      var item = queue.shift(), cur = item[0], d = item[1], r = sched.byId[cur];
+      // Links straight into this task, or into a parent summary whose constraint is what starts it.
+      var targets = [cur];
+      ancestorsOf(sched, cur).forEach(function (a) { if (Math.abs(sched.byId[a].inConstraint - r.es) < EPS) targets.push(a); });
+      targets.forEach(function (t) {
+        (bySucc[t] || []).forEach(function (l) {
+          var p = sched.byId[l.predId];
+          if (!p.isSummary) { add(l.predId, d + 1, l); return; }
+          // A summary drives through the subtask(s) that set its start or finish.
+          add(l.predId, d + 1, l);
+          var useStart = l.type === 'SS' || l.type === 'SF';
+          leavesUnder(sched, l.predId).forEach(function (x) {
+            var lr = sched.byId[x];
+            var edge = useStart ? lr.es === p.es : lr.ef === p.ef;
+            if (edge) add(x, d + 1, l);
+          });
+        });
+      });
+    }
+    return Array.from(found.values());
+  }
+
+  /** Critical leaf tasks (zero slack) in the order they happen. */
+  function criticalTasks(sched) {
+    return Object.keys(sched.byId).map(function (k) { return sched.byId[k]; })
+      .filter(function (r) { return !r.isSummary && r.critical; })
+      .sort(function (a, b) { return a.es - b.es || a.ef - b.ef || a.index - b.index; })
+      .map(function (r) { return r.id; });
   }
 
   /** Full validation for a proposed new link, including cycle detection. */
@@ -728,6 +830,9 @@
     sanitize: sanitize,
     schedule: schedule,
     validateLink: validateLink,
+    traceDependencies: traceDependencies,
+    drivingPredecessors: drivingPredecessors,
+    criticalTasks: criticalTasks,
     parseDuration: parseDuration,
     formatDuration: formatDuration,
     formatLag: formatLag,
